@@ -1,0 +1,57 @@
+import { Database } from "bun:sqlite";
+import { sql } from "./schema.ts";
+
+export function runMigrations(db: Database): void {
+  db.exec(sql);
+
+  // Best-effort forward migrations for older sqlite files.
+  // SQLite doesn't support IF NOT EXISTS for ALTER COLUMN, so we probe.
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "last_issue_state")) {
+      db.exec("ALTER TABLE symphony_runs ADD COLUMN last_issue_state TEXT DEFAULT ''");
+    }
+  } catch {
+    // ignore
+  }
+
+  // Migration: Rename last_attempt to next_attempt
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    const hasLastAttempt = cols.some((c) => c.name === "last_attempt");
+    const hasNextAttempt = cols.some((c) => c.name === "next_attempt");
+
+    if (hasLastAttempt && !hasNextAttempt) {
+      // SQLite doesn't support RENAME COLUMN directly in older versions
+      // Use temp table approach for maximum compatibility
+      db.exec(`
+        ALTER TABLE symphony_runs RENAME TO symphony_runs_old;
+
+        CREATE TABLE symphony_runs (
+          issue_id TEXT PRIMARY KEY,
+          next_attempt INTEGER DEFAULT 0,
+          last_state TEXT DEFAULT 'released',
+          last_issue_state TEXT DEFAULT '',
+          workspace_path TEXT DEFAULT '',
+          next_due_ts INTEGER,
+          last_event TEXT,
+          last_event_ts INTEGER,
+          last_error TEXT,
+          token_input INTEGER DEFAULT 0,
+          token_output INTEGER DEFAULT 0,
+          token_total INTEGER DEFAULT 0
+        );
+
+        INSERT INTO symphony_runs
+        SELECT issue_id, last_attempt, last_state, last_issue_state, workspace_path,
+               next_due_ts, last_event, last_event_ts, last_error,
+               token_input, token_output, token_total
+        FROM symphony_runs_old;
+
+        DROP TABLE symphony_runs_old;
+      `);
+    }
+  } catch {
+    // ignore - migration might have already run or table might not exist
+  }
+}

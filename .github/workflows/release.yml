@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Lint
+        run: bun run lint
+      - name: Run tests
+        run: bun test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: |
+          bun install
+          cd frontend && bun install
+      - name: Build frontend
+        run: bun run build
+      - name: Create archive
+        run: |
+          TAG=${{ github.ref_name }}
+          mkdir -p archive
+          tar -czf archive/nano-symphony-${TAG}.tar.gz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='archive' \
+            .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-symphony-archive
+          path: archive/nano-symphony-*.tar.gz
+          retention-days: 1
+
+  release:
+    name: GitHub Release & OSS Upload
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nano-symphony-archive
+          path: dist/
+      - name: Generate checksum
+        run: |
+          TAG=${{ github.ref_name }}
+          cd dist
+          sha256sum nano-symphony-${TAG}.tar.gz > nano-symphony-${TAG}.tar.gz.sha256
+      - name: Generate release metadata
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          PUBLIC_BASE_URL="https://binary-releases.oss-cn-hangzhou.aliyuncs.com/symphony"
+          cat > dist/meta.json <<EOF
+          {
+            "version": "${VERSION}",
+            "tag": "${TAG}",
+            "latest_archive_url": "${PUBLIC_BASE_URL}/latest/nano-symphony.tar.gz",
+            "latest_checksum_url": "${PUBLIC_BASE_URL}/latest/nano-symphony.tar.gz.sha256",
+            "versioned_archive_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${TAG}.tar.gz",
+            "versioned_checksum_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${TAG}.tar.gz.sha256",
+            "install_script_url": "${PUBLIC_BASE_URL}/install.sh"
+          }
+          EOF
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.json
+          generate_release_notes: true
+      - name: Setup ossutil
+        run: |
+          curl -sSL https://gosspublic.alicdn.com/ossutil/v2/2.2.1/ossutil-2.2.1-linux-amd64.zip -o ossutil.zip
+          unzip ossutil.zip
+          sudo mv ossutil-2.2.1-linux-amd64/ossutil /usr/local/bin/ossutil
+      - name: Upload archive to OSS (versioned)
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          TAG=${{ github.ref_name }}
+          ossutil cp dist/nano-symphony-${TAG}.tar.gz oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${TAG}.tar.gz --force --region cn-hangzhou
+          ossutil cp dist/nano-symphony-${TAG}.tar.gz.sha256 oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${TAG}.tar.gz.sha256 --force --region cn-hangzhou
+      - name: Upload archive to OSS (latest)
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          TAG=${{ github.ref_name }}
+          # Prepare latest artifacts: use unversioned filename and regenerate checksum
+          cp dist/nano-symphony-${TAG}.tar.gz dist/nano-symphony.tar.gz
+          (cd dist && sha256sum nano-symphony.tar.gz > nano-symphony.tar.gz.sha256)
+          ossutil cp dist/nano-symphony.tar.gz oss://${{ secrets.OSS_BUCKET }}/symphony/latest/nano-symphony.tar.gz --force --region cn-hangzhou
+          ossutil cp dist/nano-symphony.tar.gz.sha256 oss://${{ secrets.OSS_BUCKET }}/symphony/latest/nano-symphony.tar.gz.sha256 --force --region cn-hangzhou
+          ossutil cp dist/meta.json oss://${{ secrets.OSS_BUCKET }}/symphony/meta.json --force --region cn-hangzhou
+
+  publish-skill:
+    name: Publish Skill to OSS
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup ossutil
+        run: |
+          curl -sSL https://gosspublic.alicdn.com/ossutil/v2/2.2.1/ossutil-2.2.1-linux-amd64.zip -o ossutil.zip
+          unzip ossutil.zip
+          sudo mv ossutil-2.2.1-linux-amd64/ossutil /usr/local/bin/ossutil
+      - name: Upload skill to OSS (versioned)
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          TAG=${{ github.ref_name }}
+          ossutil cp skills/nano-symphony/SKILL.md oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/SKILL.md --force --region cn-hangzhou
+          ossutil cp skills/nano-symphony-local-loop/SKILL.md oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/skills/nano-symphony-local-loop/SKILL.md --force --region cn-hangzhou
+      - name: Upload skill to OSS (latest)
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          ossutil cp skills/nano-symphony/SKILL.md oss://${{ secrets.OSS_BUCKET }}/symphony/skills/nano-symphony/SKILL.md --force --region cn-hangzhou
+          ossutil cp skills/nano-symphony-local-loop/SKILL.md oss://${{ secrets.OSS_BUCKET }}/symphony/skills/nano-symphony-local-loop/SKILL.md --force --region cn-hangzhou
+
+  publish-install-script:
+    name: Publish Install Script to OSS
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup ossutil
+        run: |
+          curl -sSL https://gosspublic.alicdn.com/ossutil/v2/2.2.1/ossutil-2.2.1-linux-amd64.zip -o ossutil.zip
+          unzip ossutil.zip
+          sudo mv ossutil-2.2.1-linux-amd64/ossutil /usr/local/bin/ossutil
+      - name: Upload install script to OSS
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          ossutil cp install.sh oss://${{ secrets.OSS_BUCKET }}/symphony/install.sh --force --region cn-hangzhou
