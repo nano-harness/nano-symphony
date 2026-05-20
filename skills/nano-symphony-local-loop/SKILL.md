@@ -235,7 +235,7 @@ kill $SYM_PID
 curl -s http://localhost:4123/api/v1/runs | jq
 ```
 
-Returns array of `{issue_id, next_attempt, last_state, workspace_path, ...}` for in-flight work.
+Returns array of `{issue_id, next_attempt, last_state, workspace_path, workspace_managed, ...}` for in-flight work. The `workspace_managed` field indicates whether symphony manages the workspace lifecycle (`true`) or if it's an external user-provided path (`false`).
 
 ### Stream Events (SSE)
 
@@ -251,10 +251,14 @@ curl -s http://localhost:4123/api/v1/issues/<ISSUE_ID> | jq
 
 ### Read Agent Logs
 
-Logs are stored at `workspaces/<identifier>/logs/attempt-N.log`. Attempt numbering starts from 0.
+For managed workspaces, logs are stored at `workspaces/<identifier>/logs/attempt-N.log`. For external workspaces (when `workspace_path` is specified), logs are in `<workspace_path>/logs/attempt-N.log`. Attempt numbering starts from 0.
 
 ```bash
+# Managed workspace:
 tail -100 workspaces/DEMO-1/logs/attempt-0.log
+
+# External workspace (check workspace_path from runs API):
+tail -100 /path/to/external/workspace/logs/attempt-0.log
 ```
 
 ## Troubleshooting

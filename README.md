@@ -114,6 +114,7 @@ For all versioned releases, see the [GitHub Releases](https://github.com/nano-ha
    ```bash
    cp .env.example .env
    bun install
+   cd frontend && bun install
    ```
 
 2. Create a workflow file:
@@ -233,7 +234,7 @@ tracker:
   type: local
 agent:
   binary: nano
-  timeout_ms: 300000
+  timeout_ms: 3600000
   max_retries: 3
 goal:
   condition: "the issue is resolved and relevant checks pass"
@@ -256,8 +257,8 @@ All REST endpoints are mounted under `/api/v1`.
 | --- | --- | --- |
 | `GET` | `/issues` | List issues, optionally filtered by `state`. |
 | `GET` | `/issues/:id` | Fetch one issue. |
-| `POST` | `/issues` | Create an issue. |
-| `PUT` | `/issues/:id` | Update an issue. |
+| `POST` | `/issues` | Create an issue. Accepts optional `workspace_path` for external workspace. |
+| `PUT` | `/issues/:id` | Update an issue. Can update `workspace_path` before first run. |
 | `GET` | `/runs` | List active runs. |
 | `GET` | `/events` | List events, optionally filtered by `since`. |
 | `GET` | `/events/stream` | Stream events with Server-Sent Events. |
@@ -267,6 +268,66 @@ All REST endpoints are mounted under `/api/v1`.
 | `GET` | `/workflow` | Read the workflow document. |
 | `PUT` | `/workflow` | Save the workflow document. |
 | `GET` | `/logs/:issueId/:attempt` | Stream attempt logs with Server-Sent Events. |
+
+## Workspace
+
+By default, nano-symphony creates and manages isolated workspaces under `./workspaces/<identifier>` for each issue. When a run completes or is cancelled, managed workspaces are automatically cleaned up.
+
+### Bring your own workspace
+
+For issues that require integration with external development environments, you can specify a custom `workspace_path` when creating or updating an issue. Symphony will use the provided path directly without managing its lifecycle.
+
+**Use cases:**
+
+1. **vwsd mountpoint**: Point symphony to a persistent vwsd workspace that survives across sessions:
+
+   ```bash
+   curl -X POST http://localhost:4123/api/v1/issues \
+     -H "Content-Type: application/json" \
+     -d '{
+       "identifier": "PROJ-42",
+       "title": "Implement feature X",
+       "state": "todo",
+       "workspace_path": "/Users/me/.vwsd/workspaces/my-project"
+     }'
+   ```
+
+2. **git worktree**: Use a dedicated git worktree for the agent's changes:
+
+   ```bash
+   # Create a worktree first
+   git worktree add ../worktrees/feature-branch feature-branch
+
+   # Then create the issue pointing to it
+   curl -X POST http://localhost:4123/api/v1/issues \
+     -H "Content-Type: application/json" \
+     -d '{
+       "identifier": "TASK-1",
+       "title": "Fix bug in feature-branch",
+       "state": "todo",
+       "workspace_path": "~/code/myproject/worktrees/feature-branch"
+     }'
+   ```
+
+**Important notes:**
+
+- External workspaces are **never deleted** by symphony, even after runs complete or are cancelled.
+- The path can be absolute, relative, or use `~` for home directory expansion.
+- If the path doesn't exist, symphony will create it (mkdir -p).
+- Leave `workspace_path` empty or null to use default managed workspaces.
+- The workspace badge in the dashboard shows whether a workspace is "managed" or "external".
+
+### Diff in handoff review
+
+Symphony's handoff panel renders a unified diff of changes the agent made to the
+workspace. This only works if the workspace is a git repository:
+
+- **Managed workspaces** (default `./workspaces/<id>/`): symphony auto-creates an
+  empty baseline commit on first claim. Disable via `workspace.git_baseline: false`.
+- **External workspaces** (`workspace_path` set on the issue): symphony never
+  initializes git on your path. Make sure your path is already a git worktree, or
+  add a `workspace.hooks.after_create` hook that runs `git init && git add -A &&
+  git commit --allow-empty -m baseline`.
 
 ## Agent MCP tools
 

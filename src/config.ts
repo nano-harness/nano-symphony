@@ -10,6 +10,9 @@ const ConfigSchema = z.object({
   MAX_CONCURRENT_AGENTS: z.coerce.number().int().min(1).default(3),
   MCP_TOKEN_TTL_MS: z.coerce.number().default(3_600_000),
   ORCHESTRATOR_TICK_MS: z.coerce.number().default(5_000),
+  ALLOW_REVEAL_WORKSPACE: z.coerce.boolean().default(true),
+  RUN_LOG_PATH: z.string().default("./run_log.jsonl"),
+  RUN_LOG_ENABLED: z.coerce.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

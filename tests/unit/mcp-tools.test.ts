@@ -57,5 +57,53 @@ describe("MCP tools", () => {
     await expect(handleTool("symphony.activate_issue", { issue_id: created.id, target_state: "backlog" }, "issue-1", 0, tracker)).rejects.toThrow("must not be one of");
   });
   test("symphony.session_completed records event", async () => { const r = await handleTool("symphony.session_completed", { semantics: "success", summary: "Task completed successfully" }, "issue-1", 0, tracker) as { ok: boolean }; expect(r.ok).toBe(true); const ev = tracker.getEvents().find(e => e.kind === "session_completed"); expect(ev).toBeDefined(); });
+
+  test("symphony.session_completed with blocker_fingerprint updates issues row", async () => {
+    const r = await handleTool("symphony.session_completed", {
+      semantics: "abandoned",
+      summary: "Cannot proceed",
+      blocker_fingerprint: "sandbox_denied:/home/user/.aws"
+    }, "issue-1", 0, tracker) as { ok: boolean };
+    expect(r.ok).toBe(true);
+    expect(tracker.getLastBlockerFingerprint("issue-1")).toBe("sandbox_denied:/home/user/.aws");
+  });
+
+  test("symphony.session_completed with termination_cause persists in payload_json", async () => {
+    await handleTool("symphony.session_completed", {
+      semantics: "abandoned",
+      summary: "Gave up",
+      termination_cause: "error_threshold"
+    }, "issue-1", 0, tracker);
+
+    const ev = tracker.getEvents().find(e => e.kind === "session_completed");
+    expect(ev).toBeDefined();
+    const payload = JSON.parse(ev!.payload_json!);
+    expect(payload.termination_cause).toBe("error_threshold");
+  });
+
+  test("symphony.session_completed clears fingerprint on success", async () => {
+    tracker.updateLastBlockerFingerprint("issue-1", "previous_blocker");
+    expect(tracker.getLastBlockerFingerprint("issue-1")).toBe("previous_blocker");
+
+    await handleTool("symphony.session_completed", {
+      semantics: "success",
+      summary: "Done"
+    }, "issue-1", 0, tracker);
+
+    expect(tracker.getLastBlockerFingerprint("issue-1")).toBeNull();
+  });
+
+  test("symphony.session_completed clears fingerprint on handoff", async () => {
+    tracker.updateLastBlockerFingerprint("issue-1", "previous_blocker");
+
+    await handleTool("symphony.session_completed", {
+      semantics: "handoff",
+      summary: "Ready for review",
+      handoff_state: "in_review"
+    }, "issue-1", 0, tracker);
+
+    expect(tracker.getLastBlockerFingerprint("issue-1")).toBeNull();
+  });
+
   test("unknown tool throws error", async () => { await expect(handleTool("symphony.unknown_tool", {}, "issue-1", 0, tracker)).rejects.toThrow("Unknown tool"); });
 });

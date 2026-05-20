@@ -15,11 +15,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - name: Install dependencies
-        run: bun install
+        run: |
+          bun install
+          cd frontend && bun install
       - name: Lint
         run: bun run lint
-      - name: Run tests
-        run: bun test
+      - name: Run backend tests
+        run: bun test tests/
+      - name: Run frontend tests
+        run: cd frontend && npm run test
 
   build:
     name: Build
@@ -36,6 +40,12 @@ jobs:
           cd frontend && bun install
       - name: Build frontend
         run: bun run build
+      - name: Update package.json version
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          VERSION="${VERSION}" bun -e "const pkg = await Bun.file('package.json').json(); pkg.version = process.env.VERSION; await Bun.write('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+          echo "Updated package.json version to: $(bun -e "console.log((await Bun.file('package.json').json()).version)")"
       - name: Create archive
         run: |
           TAG=${{ github.ref_name }}

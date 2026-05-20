@@ -1,0 +1,10 @@
+[test]
+preload = ["./frontend/src/__tests__/setup.ts"]
+# Exclude frontend tests from bun test - they should be run with vitest
+# Bun resolves paths relative to each package, so we use wildcards
+exclude = ["**/frontend/**/*", "frontend/**"]
+
+[install]
+# Force browser-specific builds for SolidJS in test environment
+[install.scopes."solid-js"]
+conditions = ["browser", "development"]

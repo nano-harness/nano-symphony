@@ -7,8 +7,10 @@ CREATE TABLE IF NOT EXISTS issues (
   state TEXT NOT NULL,
   branch TEXT,
   url TEXT,
+  workspace_path TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  last_blocker_fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS issue_labels (
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS symphony_runs (
   last_state TEXT DEFAULT 'released',
   last_issue_state TEXT DEFAULT '',
   workspace_path TEXT DEFAULT '',
+  workspace_managed INTEGER DEFAULT 1,
   next_due_ts INTEGER,
   last_event TEXT,
   last_event_ts INTEGER,

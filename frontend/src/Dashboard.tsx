@@ -1,31 +1,21 @@
 import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
-import { A } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import { api, type Issue } from "./api";
-
-const STATES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"];
-const PRIORITIES = ["urgent", "high", "medium", "low"];
-
-const STATE_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  todo: "To Do",
-  in_progress: "In Progress",
-  in_review: "In Review",
-  done: "Done",
-  cancelled: "Cancelled",
-};
+import { IssueModal } from "./IssueModal";
 
 export function Dashboard() {
+  const navigate = useNavigate();
   const [issues, setIssues] = createSignal<Issue[]>([]);
   const [filter, setFilter] = createSignal("");
-  const [draggedIssue, setDraggedIssue] = createSignal<Issue | null>(null);
-  const [selectedIssue, setSelectedIssue] = createSignal<Issue | null>(null);
-  const [showCreateDialog, setShowCreateDialog] = createSignal(false);
-  const [newIssueTitle, setNewIssueTitle] = createSignal("");
-  const [newIssueDescription, setNewIssueDescription] = createSignal("");
-  const [newIssuePriority, setNewIssuePriority] = createSignal("medium");
-  const [newIssueState, setNewIssueState] = createSignal("backlog");
+  const [stateFilter, setStateFilter] = createSignal<string>("ALL");
+  const [showModal, setShowModal] = createSignal(false);
+  const [editingIssue, setEditingIssue] = createSignal<Issue | null>(null);
+  const [deletingId, setDeletingId] = createSignal<string | null>(null);
+  const [toast, setToast] = createSignal<{ message: string; type: "success" | "error" } | null>(null);
 
-  const load = async () => { setIssues(await api.listIssues()); };
+  const load = async () => {
+    setIssues(await api.listIssues());
+  };
 
   onMount(() => {
     load();
@@ -35,246 +25,209 @@ export function Dashboard() {
   });
 
   const filtered = () => {
-    const f = filter().toLowerCase();
-    return f
-      ? issues().filter(i => i.title.toLowerCase().includes(f) || i.identifier.toLowerCase().includes(f))
-      : issues();
-  };
+    let result = issues();
 
-  const getIssuesByStateAndPriority = (state: string, priority: string) => {
-    return filtered().filter(i => i.state === state && i.priority === priority);
-  };
-
-  const handleDragStart = (e: DragEvent, issue: Issue) => {
-    setDraggedIssue(issue);
-    e.dataTransfer!.effectAllowed = "move";
-  };
-
-  const handleDragOver = (e: DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer!.dropEffect = "move";
-  };
-
-  const handleDrop = async (e: DragEvent, targetState: string) => {
-    e.preventDefault();
-    const issue = draggedIssue();
-    if (issue && issue.state !== targetState) {
-      await api.updateIssue(issue.id, { state: targetState });
-      await load();
+    // State filter
+    if (stateFilter() !== "ALL") {
+      result = result.filter((i) => i.state === stateFilter());
     }
-    setDraggedIssue(null);
+
+    // Text filter
+    const f = filter().toLowerCase();
+    if (f) {
+      result = result.filter(
+        (i) =>
+          i.title.toLowerCase().includes(f) ||
+          i.description?.toLowerCase().includes(f)
+      );
+    }
+
+    return result;
   };
 
-  const handleCreateIssue = async () => {
-    if (!newIssueTitle().trim()) return;
-    await api.createIssue({
-      title: newIssueTitle(),
-      description: newIssueDescription() || null,
-      priority: newIssuePriority(),
-      state: newIssueState(),
-    });
-    setNewIssueTitle("");
-    setNewIssueDescription("");
-    setNewIssuePriority("medium");
-    setNewIssueState("backlog");
-    setShowCreateDialog(false);
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 1800);
+  };
+
+  const handleCreate = () => {
+    setEditingIssue(null);
+    setShowModal(true);
+  };
+
+  const handleEdit = (issue: Issue) => {
+    setEditingIssue(issue);
+    setShowModal(true);
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api.deleteIssue(id);
+      setDeletingId(null);
+      await load();
+      showToast("Movement removed");
+    } catch (err) {
+      showToast("Failed to delete issue", "error");
+    }
+  };
+
+  const handleSave = async () => {
     await load();
+    showToast(editingIssue() ? "Changes saved" : "Movement composed");
+  };
+
+  const confirmDelete = (id: string) => {
+    setDeletingId(id);
   };
 
   return (
-    <div style="padding:24px;font-family:system-ui;height:100vh;display:flex;flex-direction:column">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-        <h1 style="margin:0">Issues</h1>
-        <div style="display:flex;gap:12px;align-items:center">
-          <input
-            placeholder="Filter..."
-            value={filter()}
-            onInput={e => setFilter(e.currentTarget.value)}
-            style="padding:8px;border:1px solid #cbd5e1;border-radius:4px"
-          />
-          <button
-            onClick={() => setShowCreateDialog(true)}
-            style="padding:8px 16px;background:#3b82f6;color:white;border:none;border-radius:4px;cursor:pointer"
-          >
-            + New Issue
-          </button>
-          <A href="/workflow" style="padding:8px 16px;background:#64748b;color:white;text-decoration:none;border-radius:4px">
-            Edit Workflow
-          </A>
-        </div>
+    <div class="page dashboard">
+      <div class="page-header">
+        <div class="eyebrow">I. ISSUES — ALLEGRO</div>
+        <h1 class="page-title">The Score</h1>
       </div>
 
-      <div style="flex:1;overflow:auto;border:1px solid #e2e8f0;border-radius:8px">
-        <table style="width:100%;border-collapse:collapse;table-layout:fixed">
-          <thead>
-            <tr style="background:#f8fafc;position:sticky;top:0;z-index:10">
-              <th style="width:100px;padding:12px;text-align:left;border-right:1px solid #e2e8f0;border-bottom:2px solid #cbd5e1;font-weight:600">Priority</th>
-              <For each={STATES}>
-                {state => (
-                  <th style="padding:12px;text-align:center;border-right:1px solid #e2e8f0;border-bottom:2px solid #cbd5e1;font-weight:600">
-                    {STATE_LABELS[state] || state}
-                  </th>
-                )}
-              </For>
-            </tr>
-          </thead>
-          <tbody>
-            <For each={PRIORITIES}>
-              {priority => (
-                <tr>
-                  <td style="padding:12px;border-right:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;font-weight:500;text-transform:capitalize;background:#f8fafc">
-                    {priority}
-                  </td>
-                  <For each={STATES}>
-                    {state => (
-                      <td
-                        style="padding:8px;border-right:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;vertical-align:top;background:white"
-                        onDragOver={handleDragOver}
-                        onDrop={(e) => handleDrop(e, state)}
-                      >
-                        <div style="display:flex;flex-direction:column;gap:6px;min-height:60px">
-                          <For each={getIssuesByStateAndPriority(state, priority)}>
-                            {issue => (
-                              <div
-                                draggable
-                                onDragStart={(e) => handleDragStart(e, issue)}
-                                onClick={() => setSelectedIssue(issue)}
-                                style="padding:8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;cursor:pointer;font-size:12px"
-                                onMouseEnter={(e) => e.currentTarget.style.background = "#e2e8f0"}
-                                onMouseLeave={(e) => e.currentTarget.style.background = "#f1f5f9"}
-                              >
-                                <div style="font-family:monospace;font-weight:600;color:#475569">{issue.identifier}</div>
-                                <div style="margin-top:4px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                                  {issue.title}
-                                </div>
-                              </div>
-                            )}
-                          </For>
-                        </div>
-                      </td>
-                    )}
-                  </For>
-                </tr>
+      <div class="dashboard-toolbar">
+        <input
+          type="text"
+          class="search-input"
+          placeholder="Filter..."
+          value={filter()}
+          onInput={(e) => setFilter(e.currentTarget.value)}
+        />
+
+        <div class="state-chips">
+          <For each={["ALL", "TODO", "ACTIVE", "REVIEW", "DONE", "BACKLOG"]}>
+            {(chip) => (
+              <button
+                class="state-chip"
+                classList={{
+                  active: stateFilter() === chip ||
+                    (chip === "ACTIVE" && stateFilter() === "in_progress") ||
+                    (chip === "REVIEW" && stateFilter() === "in_review") ||
+                    (chip === "TODO" && stateFilter() === "todo") ||
+                    (chip === "DONE" && stateFilter() === "done") ||
+                    (chip === "BACKLOG" && stateFilter() === "backlog")
+                }}
+                onClick={() => {
+                  const map: Record<string, string> = {
+                    ALL: "ALL",
+                    TODO: "todo",
+                    ACTIVE: "in_progress",
+                    REVIEW: "in_review",
+                    DONE: "done",
+                    BACKLOG: "backlog",
+                  };
+                  setStateFilter(map[chip]);
+                }}
+              >
+                {chip}
+              </button>
+            )}
+          </For>
+        </div>
+
+        <button class="btn" onClick={handleCreate}>
+          + New Issue
+        </button>
+        <A href="/workflow" class="btn btn-secondary">
+          Edit Workflow
+        </A>
+      </div>
+
+      <div class="score">
+        <Show when={filtered().length === 0}>
+          <div class="score-empty">
+            <div class="score-empty-icon">𝄞</div>
+            <div class="score-empty-text">A symphony begins with a single bar.</div>
+            <div class="score-empty-hint">Create your first issue to start composing.</div>
+          </div>
+        </Show>
+
+        <Show when={filtered().length > 0}>
+          <div class="score-header">
+            <div class="score-header-cell">№</div>
+            <div class="score-header-cell">Movement</div>
+            <div class="score-header-cell">State</div>
+            <div class="score-header-cell">Priority</div>
+            <div class="score-header-cell">Actions</div>
+          </div>
+          <ul class="score-list">
+            <For each={filtered()}>
+              {(issue, index) => (
+                <li
+                  class="bar"
+                  style={{ "animation-delay": `${index() * 28}ms` }}
+                  onClick={() => navigate(`/issues/${issue.id}`)}
+                >
+                  <div class="bar-num">{index() + 1}</div>
+                  <div class="bar-title">{issue.title}</div>
+                  <div class="bar-state">
+                    <span class={`pill ${issue.state}`}>
+                      {issue.state.replace("_", " ")}
+                    </span>
+                  </div>
+                  <div class="bar-priority">
+                    <span class={`priority-dot ${issue.priority}`}></span>
+                    <span class="priority-text">{issue.priority}</span>
+                  </div>
+                  <div class="bar-actions" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      class="icon-btn"
+                      onClick={() => handleEdit(issue)}
+                      title="Edit issue"
+                    >
+                      ✎
+                    </button>
+                    <button
+                      class="icon-btn"
+                      onClick={() => confirmDelete(issue.id)}
+                      title="Delete issue"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </li>
               )}
             </For>
-          </tbody>
-        </table>
+          </ul>
+        </Show>
       </div>
 
-      {/* Detail Slide-in Panel */}
-      <Show when={selectedIssue()}>
-        <div
-          style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100"
-          onClick={() => setSelectedIssue(null)}
-        >
-          <div
-            style="position:absolute;right:0;top:0;bottom:0;width:500px;background:white;box-shadow:-2px 0 10px rgba(0,0,0,0.1);padding:24px;overflow:auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setSelectedIssue(null)}
-              style="position:absolute;top:16px;right:16px;background:transparent;border:none;font-size:24px;cursor:pointer;color:#64748b"
-            >
-              ×
-            </button>
-            <div style="font-family:monospace;color:#64748b;margin-bottom:8px">{selectedIssue()!.identifier}</div>
-            <h2 style="margin:0 0 16px 0">{selectedIssue()!.title}</h2>
-            <div style="display:flex;gap:12px;margin-bottom:16px">
-              <span style="padding:4px 8px;background:#f1f5f9;border-radius:4px;font-size:12px;text-transform:capitalize">
-                {selectedIssue()!.priority}
-              </span>
-              <span style="padding:4px 8px;background:#f1f5f9;border-radius:4px;font-size:12px">
-                {STATE_LABELS[selectedIssue()!.state] || selectedIssue()!.state}
-              </span>
+      {/* Issue Modal */}
+      <Show when={showModal()}>
+        <IssueModal
+          issue={editingIssue()}
+          onClose={() => setShowModal(false)}
+          onSave={handleSave}
+        />
+      </Show>
+
+      {/* Delete Confirmation */}
+      <Show when={deletingId()}>
+        <div class="modal-backdrop" onClick={() => setDeletingId(null)}>
+          <div class="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-chapter-mark"></div>
+            <div class="modal-confirm-body">
+              <h3 class="modal-confirm-title">CODA</h3>
+              <p class="modal-confirm-message">Remove this movement?</p>
             </div>
-            <Show when={selectedIssue()!.description}>
-              <div style="margin-bottom:16px;color:#475569;white-space:pre-wrap">{selectedIssue()!.description}</div>
-            </Show>
-            <div style="margin-top:24px">
-              <A
-                href={`/issues/${selectedIssue()!.id}`}
-                style="display:inline-block;padding:8px 16px;background:#3b82f6;color:white;text-decoration:none;border-radius:4px"
-              >
-                View Full Details
-              </A>
+            <div class="modal-confirm-footer">
+              <button class="btn btn-ghost" onClick={() => setDeletingId(null)}>
+                Cancel
+              </button>
+              <button class="btn btn-danger" onClick={() => handleDelete(deletingId()!)}>
+                Remove
+              </button>
             </div>
           </div>
         </div>
       </Show>
 
-      {/* Create Issue Dialog */}
-      <Show when={showCreateDialog()}>
-        <div
-          style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:flex;align-items:center;justify-content:center"
-          onClick={() => setShowCreateDialog(false)}
-        >
-          <div
-            style="background:white;border-radius:8px;padding:24px;width:500px;max-width:90%"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style="margin:0 0 16px 0">Create New Issue</h2>
-            <div style="display:flex;flex-direction:column;gap:12px">
-              <div>
-                <label style="display:block;margin-bottom:4px;font-weight:500">Title</label>
-                <input
-                  type="text"
-                  value={newIssueTitle()}
-                  onInput={(e) => setNewIssueTitle(e.currentTarget.value)}
-                  style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:4px"
-                  placeholder="Issue title..."
-                />
-              </div>
-              <div>
-                <label style="display:block;margin-bottom:4px;font-weight:500">Description</label>
-                <textarea
-                  value={newIssueDescription()}
-                  onInput={(e) => setNewIssueDescription(e.currentTarget.value)}
-                  style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:4px;min-height:100px;resize:vertical"
-                  placeholder="Issue description..."
-                />
-              </div>
-              <div style="display:flex;gap:12px">
-                <div style="flex:1">
-                  <label style="display:block;margin-bottom:4px;font-weight:500">Priority</label>
-                  <select
-                    value={newIssuePriority()}
-                    onChange={(e) => setNewIssuePriority(e.currentTarget.value)}
-                    style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:4px"
-                  >
-                    <For each={PRIORITIES}>
-                      {priority => <option value={priority}>{priority}</option>}
-                    </For>
-                  </select>
-                </div>
-                <div style="flex:1">
-                  <label style="display:block;margin-bottom:4px;font-weight:500">State</label>
-                  <select
-                    value={newIssueState()}
-                    onChange={(e) => setNewIssueState(e.currentTarget.value)}
-                    style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:4px"
-                  >
-                    <For each={STATES}>
-                      {state => <option value={state}>{STATE_LABELS[state] || state}</option>}
-                    </For>
-                  </select>
-                </div>
-              </div>
-              <div style="display:flex;gap:12px;margin-top:8px">
-                <button
-                  onClick={handleCreateIssue}
-                  style="flex:1;padding:10px;background:#3b82f6;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500"
-                >
-                  Create Issue
-                </button>
-                <button
-                  onClick={() => setShowCreateDialog(false)}
-                  style="flex:1;padding:10px;background:#e2e8f0;color:#475569;border:none;border-radius:4px;cursor:pointer;font-weight:500"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
+      {/* Toast Notifications */}
+      <Show when={toast()}>
+        <div class="toast-container">
+          <div class={`toast ${toast()!.type}`}>{toast()!.message}</div>
         </div>
       </Show>
     </div>

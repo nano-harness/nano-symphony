@@ -16,6 +16,7 @@ export const WorkflowSchema = z.object({
   }).optional(),
   workspace: z.object({
     root: z.string().default("./workspaces"),
+    git_baseline: z.boolean().default(true),
     hooks: z.object({
       after_create: z.string().default(""),
       before_run: z.string().default(""),
@@ -25,7 +26,7 @@ export const WorkflowSchema = z.object({
   }).optional(),
   agent: z.object({
     binary: z.string().default("nano"),
-    timeout_ms: z.number().default(300000),
+    timeout_ms: z.number().default(3600000),
     max_retries: z.number().default(3),
     sandbox: z.object({
       backend: z.enum(["native", "docker", "none"]).default("native"),

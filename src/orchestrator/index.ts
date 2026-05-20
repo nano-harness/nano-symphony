@@ -108,8 +108,14 @@ export function createOrchestrator(
   return {
     start() {
       running = true;
-      scheduleNext(false);
       logger.info("Orchestrator started");
+      // Run first tick immediately instead of waiting ORCHESTRATOR_TICK_MS
+      tick().then((dispatched) => {
+        scheduleNext(dispatched > 0);
+      }).catch((err: unknown) => {
+        logger.error({ err }, "Orchestrator tick error");
+        scheduleNext(false);
+      });
     },
     async stop() {
       running = false;

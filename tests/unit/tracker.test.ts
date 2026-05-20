@@ -92,4 +92,37 @@ describe("tracker", () => {
     tracker.claimIssue("1", 0); tracker.updateTokenStats("1", 100, 200, 300);
     const runs = tracker.getActiveRuns(); expect(runs[0].token_input).toBe(100);
   });
+
+  test("updateLastBlockerFingerprint persists across handles", () => {
+    tracker.insertIssue({ id: "1", identifier: "A-1", title: "Issue A", state: "todo" });
+    tracker.updateLastBlockerFingerprint("1", "sandbox_denied:/etc/passwd");
+    expect(tracker.getLastBlockerFingerprint("1")).toBe("sandbox_denied:/etc/passwd");
+
+    // Simulate reopening database
+    const newTracker = createTracker(db);
+    expect(newTracker.getLastBlockerFingerprint("1")).toBe("sandbox_denied:/etc/passwd");
+  });
+
+  test("updateLastBlockerFingerprint can clear fingerprint with null", () => {
+    tracker.insertIssue({ id: "1", identifier: "A-1", title: "Issue A", state: "todo" });
+    tracker.updateLastBlockerFingerprint("1", "some_blocker");
+    expect(tracker.getLastBlockerFingerprint("1")).toBe("some_blocker");
+
+    tracker.updateLastBlockerFingerprint("1", null);
+    expect(tracker.getLastBlockerFingerprint("1")).toBeNull();
+  });
+
+  test("getLastBlockerFingerprint returns null for missing issue", () => {
+    expect(tracker.getLastBlockerFingerprint("nonexistent")).toBeNull();
+  });
+
+  test("migration upgrades schema with last_blocker_fingerprint", () => {
+    // Schema migration is already tested by beforeEach calling runMigrations
+    // This test verifies the column exists and works
+    tracker.insertIssue({ id: "1", identifier: "A-1", title: "Issue A", state: "todo" });
+    tracker.updateLastBlockerFingerprint("1", "test_fingerprint");
+
+    const raw = db.query("SELECT last_blocker_fingerprint FROM issues WHERE id = ?").get("1") as { last_blocker_fingerprint: string };
+    expect(raw.last_blocker_fingerprint).toBe("test_fingerprint");
+  });
 });

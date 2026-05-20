@@ -26,6 +26,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - name: Install dependencies
-        run: bun install
-      - name: Run tests
-        run: bun test
+        run: |
+          bun install
+          cd frontend && bun install
+      - name: Run backend tests
+        run: bun test tests/
+      - name: Run frontend tests
+        run: cd frontend && npm run test

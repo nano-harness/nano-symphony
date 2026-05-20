@@ -20,12 +20,31 @@ async function main() {
   const getWorkflow = () => currentWorkflow;
   const orchestrator = createOrchestrator(tracker, getWorkflow, logger);
   const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick());
-  const server = Bun.serve({ port: config.PORT, fetch: app.fetch });
+  const server = Bun.serve({
+    port: config.PORT,
+    fetch: app.fetch,
+    idleTimeout: 0,
+  });
   logger.info({ port: config.PORT }, "HTTP server listening");
+  maybeOpenBrowser(`http://localhost:${config.PORT}`, logger);
   orchestrator.start();
   const shutdown = async () => { await orchestrator.stop(); server.stop(); db.close(); process.exit(0); };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+}
+
+function maybeOpenBrowser(url: string, log: pino.Logger) {
+  if (process.env.SYMPHONY_OPEN === "0" || process.env.NO_BROWSER) return;
+  const cmd =
+    process.platform === "darwin" ? ["open", url]
+    : process.platform === "win32" ? ["cmd", "/c", "start", "", url]
+    : ["xdg-open", url];
+  try {
+    Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+    log.info({ url }, "Opened dashboard in browser");
+  } catch (err) {
+    log.warn({ err, url }, "Could not auto-open browser");
+  }
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

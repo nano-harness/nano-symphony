@@ -26,6 +26,9 @@ export interface NanoSentinel {
   duration_ms?: number;
   tool_calls?: number;
   tokens?: { input: number; output: number };
+  reason?: string;
+  termination_cause?: string;
+  blocker_fingerprint?: string;
   goal_state?: {
     condition: string;
     achieved_at?: string | null;
@@ -125,6 +128,12 @@ function extractSentinelFromText(text: string): NanoSentinel | null {
   return null;
 }
 
+// Extracts sentinel from stderr first (success path), then falls back to stdout (failure path).
+// This matches nano-agent's contract: success writes to stderr, failure writes to stdout.
+function extractSentinel(stdout: string, stderr: string): NanoSentinel | null {
+  return extractSentinelFromText(stderr) ?? extractSentinelFromText(stdout);
+}
+
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig } = opts;
 
@@ -208,10 +217,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const stderrText = new TextDecoder().decode(Buffer.concat(stderrChunks.map(c => Buffer.from(c))));
 
   // Write combined log file for debugging
-  await Bun.write(logFile, `${stdoutText}\n--- stderr ---\n${stderrText}`);
+  await Bun.write(logFile, `--- stdout ---\n${stdoutText}\n--- stderr ---\n${stderrText}`);
 
-  // Extract sentinel from stdout (zero race - all output collected before parsing)
-  const sentinel = extractSentinelFromText(stdoutText);
+  // Extract sentinel from stderr first (success path), then stdout (failure path)
+  const sentinel = extractSentinel(stdoutText, stderrText);
 
   return { exitCode, killedByTimeout, duration_ms: Date.now() - startedAt, sentinel };
 }

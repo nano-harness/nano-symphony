@@ -36,6 +36,12 @@ log_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
+normalize_version() {
+    local version="$1"
+    version="${version#v}"
+    printf '%s\n' "${version}"
+}
+
 # Check if bun is installed
 check_bun() {
     if command -v bun &> /dev/null; then
@@ -66,6 +72,38 @@ install_symphony() {
         esac
         archive_url="${OSS_BASE_URL}/releases/${tag_version}/nano-symphony-${tag_version}.tar.gz"
     fi
+
+    # Check current version if already installed
+    if [ -f "${INSTALL_DIR}/package.json" ]; then
+        current_version=$(cd "${INSTALL_DIR}" && bun -e "console.log(require('./package.json').version)" 2>/dev/null || true)
+        current_version_normalized=$(normalize_version "${current_version}")
+
+        # If a specific version is requested and we're already at that version, skip
+        if [ "${version}" != "latest" ] && [ -n "${current_version_normalized}" ] && [ "${current_version_normalized}" = "$(normalize_version "${version}")" ]; then
+            log_info "nano-symphony is already at version ${current_version}."
+            return 0
+        fi
+
+        # If latest is requested, check against published metadata
+        if [ "${version}" = "latest" ] && [ -n "${current_version}" ]; then
+            log_info "Checking for updates..."
+            local meta_file
+            meta_file=$(mktemp) || return 1
+            local meta_url="${OSS_BASE_URL}/meta.json"
+            if curl -fsSL "${meta_url}" -o "${meta_file}" 2>/dev/null; then
+                latest_version=$(META_FILE="${meta_file}" bun -e 'const meta = await Bun.file(process.env.META_FILE).json(); console.log(meta.version ?? "");' 2>/dev/null || true)
+                rm -f "${meta_file}"
+                if [ -n "${latest_version}" ] && [ "${current_version_normalized}" = "$(normalize_version "${latest_version}")" ]; then
+                    log_info "nano-symphony is already up to date (${current_version})."
+                    return 0
+                fi
+            else
+                rm -f "${meta_file}"
+                log_warn "Failed to fetch update metadata, proceeding with installation"
+            fi
+        fi
+    fi
+
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "${tmp_dir}"' EXIT
 
@@ -162,6 +200,13 @@ if [ ! -d "\${INSTALL_DIR}" ]; then
 fi
 
 cd "\${INSTALL_DIR}"
+
+# Generated wrapper must carry its own helpers after installation.
+normalize_version() {
+  version="\$1"
+  version="\${version#v}"
+  printf '%s\n' "\${version}"
+}
 
 print_help() {
   cat <<HLP
@@ -284,6 +329,15 @@ case "\${1:-}" in
     fi ;;
   update)
     requested_version="\${2:-}"
+    current_version="\$(bun -e "console.log(require('\${INSTALL_DIR}/package.json').version)" 2>/dev/null || true)"
+    current_version_normalized="\$(normalize_version "\${current_version}")"
+
+    # If a specific version is requested and we're already at that version, skip
+    if [ -n "\${requested_version}" ] && [ -n "\${current_version_normalized}" ] && [ "\${current_version_normalized}" = "\$(normalize_version "\${requested_version}")" ]; then
+      echo "nano-symphony is already at version \${current_version}."
+      exit 0
+    fi
+
     meta_file="\$(mktemp)" || exit 1
     meta_url="${OSS_BASE_URL}/meta.json"
     if ! curl -fsSL "\${meta_url}" -o "\${meta_file}"; then
@@ -296,11 +350,13 @@ case "\${1:-}" in
     rm -f "\${meta_file}"
     [ "\${latest_version}" ] || { echo "Update metadata is missing version"; exit 1; }
     [ "\${install_url}" ] || install_url="${OSS_BASE_URL}/install.sh"
-    current_version="\$(bun -e "console.log(require('\${INSTALL_DIR}/package.json').version)" 2>/dev/null || true)"
-    if [ -z "\${requested_version}" ] && [ "\${current_version}" = "\${latest_version}" ]; then
+
+    # If no specific version requested and we're already at latest, skip
+    if [ -z "\${requested_version}" ] && [ -n "\${current_version_normalized}" ] && [ "\${current_version_normalized}" = "\$(normalize_version "\${latest_version}")" ]; then
       echo "nano-symphony is already up to date (\${current_version})."
       exit 0
     fi
+
     version="\${requested_version:-latest}"
     install_script="\$(mktemp)" || exit 1
     if curl -fsSL "\${install_url}" -o "\${install_script}"; then

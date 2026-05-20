@@ -10,6 +10,7 @@ export interface Issue {
   state: string;
   branch: string | null;
   url: string | null;
+  workspace_path: string | null;
   created_at: string;
   updated_at: string;
   labels: string[];
@@ -25,6 +26,7 @@ export interface IssueInput {
   state: string;
   branch?: string | null;
   url?: string | null;
+  workspace_path?: string | null;
   labels?: string[];
 }
 
@@ -34,6 +36,7 @@ export interface SymphonyRun {
   last_state: string;
   last_issue_state: string;
   workspace_path: string;
+  workspace_managed: boolean;
   next_due_ts: number | null;
   last_event: string | null;
   last_event_ts: number | null;
@@ -54,8 +57,8 @@ export interface SymphonyEvent {
 
 export function createTracker(db: Database) {
   const insertIssueStmt = db.prepare(`
-    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertLabelStmt = db.prepare(`
@@ -64,6 +67,22 @@ export function createTracker(db: Database) {
 
   const deleteLabelStmt = db.prepare(`
     DELETE FROM issue_labels WHERE issue_id = ?
+  `);
+
+  const deleteIssueStmt = db.prepare(`
+    DELETE FROM issues WHERE id = ?
+  `);
+
+  const deleteIssueRunStmt = db.prepare(`
+    DELETE FROM symphony_runs WHERE issue_id = ?
+  `);
+
+  const deleteIssueEventsStmt = db.prepare(`
+    DELETE FROM symphony_events WHERE issue_id = ?
+  `);
+
+  const deleteIssueBlockersStmt = db.prepare(`
+    DELETE FROM issue_blockers WHERE issue_id = ? OR blocker_id = ?
   `);
 
   const getIssueBaseStmt = db.prepare(`
@@ -199,7 +218,15 @@ export function createTracker(db: Database) {
   `);
 
   const updateWorkspacePathStmt = db.prepare(`
-    UPDATE symphony_runs SET workspace_path = ? WHERE issue_id = ?
+    UPDATE symphony_runs SET workspace_path = ?, workspace_managed = ? WHERE issue_id = ?
+  `);
+
+  const updateLastBlockerFingerprintStmt = db.prepare(`
+    UPDATE issues SET last_blocker_fingerprint = ? WHERE id = ?
+  `);
+
+  const getLastBlockerFingerprintStmt = db.prepare(`
+    SELECT last_blocker_fingerprint FROM issues WHERE id = ?
   `);
 
   function getIssue(id: string): Issue | null {
@@ -226,6 +253,7 @@ export function createTracker(db: Database) {
       issue.state,
       issue.branch ?? null,
       issue.url ?? null,
+      issue.workspace_path ?? null,
       (issue as { created_at?: string }).created_at ?? now,
       (issue as { updated_at?: string }).updated_at ?? now,
     );
@@ -285,7 +313,8 @@ export function createTracker(db: Database) {
   }
 
   function fetchDueRetries(now: number): SymphonyRun[] {
-    return fetchDueRetriesStmt.all(now) as SymphonyRun[];
+    const runs = fetchDueRetriesStmt.all(now) as Array<Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }>;
+    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1 }));
   }
 
   function recordEvent(issueId: string, kind: string, message: string, payload?: unknown): void {
@@ -300,11 +329,14 @@ export function createTracker(db: Database) {
   }
 
   function getActiveRuns(): SymphonyRun[] {
-    return getActiveRunsStmt.all() as SymphonyRun[];
+    const runs = getActiveRunsStmt.all() as Array<Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }>;
+    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1 }));
   }
 
   function getRun(issueId: string): SymphonyRun | null {
-    return (getRunStmt.get(issueId) as SymphonyRun | null) ?? null;
+    const run = getRunStmt.get(issueId) as (Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }) | null;
+    if (!run) return null;
+    return { ...run, workspace_managed: run.workspace_managed === 1 };
   }
 
   function getEvents(since?: number): SymphonyEvent[] {
@@ -318,8 +350,27 @@ export function createTracker(db: Database) {
     return (getLatestEventByKindStmt.get(issueId, kind) as SymphonyEvent | null) ?? null;
   }
 
-  function updateWorkspacePath(issueId: string, wsPath: string): void {
-    updateWorkspacePathStmt.run(wsPath, issueId);
+  function updateWorkspacePath(issueId: string, wsPath: string, managed: boolean): void {
+    updateWorkspacePathStmt.run(wsPath, managed ? 1 : 0, issueId);
+  }
+
+  function deleteIssue(id: string): boolean {
+    if (!getIssueBaseStmt.get(id)) return false;
+    deleteLabelStmt.run(id);
+    deleteIssueBlockersStmt.run(id, id);
+    deleteIssueEventsStmt.run(id);
+    deleteIssueRunStmt.run(id);
+    deleteIssueStmt.run(id);
+    return true;
+  }
+
+  function updateLastBlockerFingerprint(issueId: string, fingerprint: string | null): void {
+    updateLastBlockerFingerprintStmt.run(fingerprint, issueId);
+  }
+
+  function getLastBlockerFingerprint(issueId: string): string | null {
+    const row = getLastBlockerFingerprintStmt.get(issueId) as { last_blocker_fingerprint: string | null } | null;
+    return row?.last_blocker_fingerprint ?? null;
   }
 
   return {
@@ -342,6 +393,9 @@ export function createTracker(db: Database) {
     getEvents,
     getLatestEventByKind,
     updateWorkspacePath,
+    deleteIssue,
+    updateLastBlockerFingerprint,
+    getLastBlockerFingerprint,
   };
 }
 

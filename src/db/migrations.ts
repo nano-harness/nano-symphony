@@ -54,4 +54,34 @@ export function runMigrations(db: Database): void {
   } catch {
     // ignore - migration might have already run or table might not exist
   }
+
+  // 2026-05: issues.workspace_path
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "workspace_path")) {
+      db.exec("ALTER TABLE issues ADD COLUMN workspace_path TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: symphony_runs.workspace_managed
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "workspace_managed")) {
+      db.exec("ALTER TABLE symphony_runs ADD COLUMN workspace_managed INTEGER DEFAULT 1");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.last_blocker_fingerprint
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "last_blocker_fingerprint")) {
+      db.exec("ALTER TABLE issues ADD COLUMN last_blocker_fingerprint TEXT");
+    }
+  } catch {
+    // ignore
+  }
 }

@@ -27,10 +27,16 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
-  return JSON.parse(text);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000); // 10s timeout
+  try {
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+    return JSON.parse(text);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, tickMs = 100): Promise<void> {
@@ -118,24 +124,27 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
   };
 
   try {
+    // Wait for server to start (with timeout)
     await waitFor(async () => {
       try {
-        const res = await fetch(`${baseUrl}/api/v1/issues`);
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 2000);
+        const res = await fetch(`${baseUrl}/api/v1/issues`, { signal: controller.signal }).finally(() => clearTimeout(tid));
         return res.ok;
       } catch {
         return false;
       }
-    }, 5000);
+    }, 10_000);
 
     const issue = await fetchJson(`${baseUrl}/api/v1/issues`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        identifier: `e2e/${port}`,
+        identifier: `E2E-${port}`,
         title: "E2E debug issue",
         description: "Created by bun:test",
         priority: "medium",
-        state: "open",
+        state: "todo",
         labels: ["e2e"],
       }),
     });

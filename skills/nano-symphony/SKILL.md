@@ -33,6 +33,7 @@ Use this skill whenever the workspace has been prepared by nano-symphony and you
 
 - `SYMPHONY_ISSUE_ID` - The current issue or task identifier.
 - `SYMPHONY_WORKSPACE` - The workspace path for this run.
+- `SYMPHONY_WORKSPACE_MANAGED` - `"1"` if symphony manages this workspace, `"0"` if it's an external user-provided path.
 - `SYMPHONY_MCP_URL` - The Symphony MCP endpoint.
 - `SYMPHONY_TOKEN` - The token used by the configured MCP server.
 
@@ -41,7 +42,34 @@ Use this skill whenever the workspace has been prepared by nano-symphony and you
 ### Required (every session)
 
 - `symphony.fetch_issue` — Fetch the current issue details and orchestration context. **Call once at session start.**
-- `symphony.session_completed` — Mark the session complete with `{semantics, summary, handoff_state?}`. **Required before exit.** `semantics ∈ {success, needs_retry, handoff, abandoned}`.
+- `symphony.session_completed` — Mark the session complete with `{semantics, summary, handoff_state?}`. **Required before exit, including failure paths.** If the task cannot be completed, still call this with semantics=abandoned or needs_retry plus a concise summary and (optional) blocker_fingerprint. `semantics ∈ {success, needs_retry, handoff, abandoned}`.
+
+You may attach artifacts to help the reviewer:
+
+```json
+{
+  "semantics": "handoff",
+  "summary": "Implemented JSON streaming parser. Tests pass.",
+  "artifacts": [
+    {"kind": "file_diff", "path": "src/parser.ts", "additions": 85, "deletions": 12},
+    {"kind": "command_output", "label": "tests", "cmd": "pnpm test", "exit_code": 0, "output": "12 passed"}
+  ],
+  "follow_ups": ["Performance test on 100MB file pending"],
+  "metrics": {"turns_used": 12, "files_touched": 3, "tests_passed": 12}
+}
+```
+
+For a failure, prefer:
+
+```json
+{
+  "semantics": "abandoned",
+  "summary": "Cannot read ~/.aws/credentials — protected by default blocklist.",
+  "blocker_fingerprint": "sandbox_denied:~/.aws/credentials"
+}
+```
+
+`blocker_fingerprint` should be ≤ 80 chars, deterministic across attempts, and free of timestamps / PIDs / random ids. Symphony will short-circuit the issue to `blocked` if the same fingerprint repeats.
 
 ### Recommended (when applicable)
 
@@ -57,29 +85,22 @@ Use this skill whenever the workspace has been prepared by nano-symphony and you
 
 ## Sandbox restrictions
 
-Your `run_shell_command` is wrapped by a process sandbox. You can:
+`run_shell_command` and filesystem tools share a default sensitive-file blocklist that **always applies, even when `sandbox.enabled: false`**. The blocklist denies access to:
 
-- ✅ Read & write files inside `$SYMPHONY_WORKSPACE` (this is your workspace).
-- ✅ Read system commands in `/usr`, `/bin`, `/etc`.
-- ✅ Write temporary files under `/tmp` (note: tmpfs, gone after exit).
-- ✅ Network access (HTTP / DNS — needed for `git clone`, `pip`, etc.).
+- Cloud credentials: `~/.aws/`, `~/.gnupg/`, `~/.kube/`, `~/.docker/config.json`
+- Shell secrets: `~/.ssh/`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`
+- nano-agent's own config: `~/.nano/*.yaml`, `~/.nano/*.yml`, `~/.nano/config*`, and the equivalents under `~/.config/nano/`
+- Glob patterns: `**/.env`, `**/.env.*`, `**/credentials`, `**/*.pem`, `**/*.key`
 
-You CANNOT:
+`~/.nano/skills/**` is **explicitly readable / writable** so you can update SKILL files when asked.
 
-- ❌ Write outside `$SYMPHONY_WORKSPACE` (no `~/`, no `/etc`, no other paths).
-- ❌ Read sensitive paths: `~/.ssh/`, `~/Library/Keychains`, `~/.aws/`, etc.
-- ❌ See env vars like `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`.
-  (These are stripped from your shell's env by design — they belong to nano-agent
-  itself, not to commands you run.)
+When `sandbox.enabled: true`, additional `allowed_paths` / `read_only_paths` / `blocked_paths` from the workflow YAML are layered on top. In embedded mode the default `allowed_paths` are `[projectPath, os.TempDir(), userCacheDir()]` (NOT `~/.nano` or `~/.config/nano`); override via `NANO_SANDBOX_ALLOWED_PATHS`.
 
-If you need a path mounted that you cannot reach, **report a blocker via
-`symphony.report_event`** and ask the user to add it under
-`agent.sandbox.extra_read_only_paths` in the workflow YAML.
+Network access, env-var stripping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`), and `Operation not permitted` semantics are unchanged.
 
-If a command unexpectedly fails with `Operation not permitted`, **do not retry
-in a loop** — it's a sandbox restriction, not a transient error. Report the
-blocker and either work around it within the sandbox or propose a workflow
-config change.
+**Note on external workspaces:** When `SYMPHONY_WORKSPACE_MANAGED=0`, the workspace is user-provided (e.g., vwsd mountpoint, git worktree). Symphony will not delete this workspace after the run completes. All blocklist restrictions still apply.
+
+If a path you legitimately need is denied, **report a blocker via `symphony.report_event`** (and prefer calling `symphony.session_completed` with `semantics=abandoned` + a `blocker_fingerprint` once you've decided to stop). Do not retry the same denied path in a loop — it's a deterministic restriction, not a transient error.
 
 ## Required workflow
 
@@ -88,6 +109,14 @@ config change.
 3. Report progress when you complete a meaningful unit of work, hit a blocker, or finish validation.
 4. Validate changes using the repository's existing test, lint, or build commands when applicable.
 5. Call `symphony.session_completed` before exiting, even if the task cannot be completed.
+   For failures, set `semantics` to `needs_retry` (transient) or `abandoned` (cannot proceed),
+   and include `blocker_fingerprint` (a short stable string like
+   `sandbox_denied:~/.aws/credentials` or `evaluator_invalid_json:goal_eval`)
+   so the orchestrator can short-circuit same-cause retries.
+
+### Sentinel fallback
+
+If the agent process is force-terminated by a turn-policy guard (`error_threshold`, `diminishing_returns`, `similar_content_loop`, `context_done`, `goal_max_turns`) the LLM does not get a final turn and cannot call `symphony.session_completed`. In that case nano-agent writes `termination_cause` and `blocker_fingerprint` into the `<<<NANO_RESULT>>>` stdout sentinel; symphony reads them automatically. You don't need to do anything special — but knowing this exists may help you decide between *trying to reach success-with-explanation* (calling MCP yourself) vs. *letting the guard fire*.
 
 ## Reporting guidance
 

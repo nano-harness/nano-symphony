@@ -1,6 +1,7 @@
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import type { Tracker } from "../db/tracker.ts";
+import { nullishString } from "../http/schemas.ts";
 
 export const TOOL_DEFINITIONS = [
   {
@@ -94,7 +95,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "symphony.session_completed",
-    description: "REQUIRED - Must be called before session exits.",
+    description: "REQUIRED - Must be called before session exits. Optionally attach typed artifacts, follow-up notes, and self-reported metrics so reviewers can act on the handoff without scrubbing logs.",
     inputSchema: {
       type: "object",
       properties: {
@@ -103,8 +104,48 @@ export const TOOL_DEFINITIONS = [
           enum: ["success", "needs_retry", "handoff", "abandoned"],
           description: "Completion semantics",
         },
-        summary: { type: "string", description: "What happened in this session" },
-        handoff_state: { type: "string", description: "Target state if semantics=handoff" },
+        summary: { type: "string", description: "What happened in this session (markdown OK)" },
+        handoff_state: { type: "string", description: "Target state if semantics=handoff (e.g. 'in_review')" },
+        blocker_fingerprint: {
+          type: "string",
+          description: "Short stable identifier of the blocker, e.g. 'sandbox_denied:/abs/path' or 'dyld_missing:libpcre2'. Used by symphony to short-circuit same-cause retries."
+        },
+        termination_cause: {
+          type: "string",
+          description: "Closed-enum reason describing why the session ended. Typical values: task_done | natural_completion | error_threshold | diminishing_returns | similar_content_loop | context_done | goal_max_turns | llm_failure | crash."
+        },
+        artifacts: {
+          type: "array",
+          description:
+            "Typed artifacts for the reviewer. Each item is one of: " +
+            "{kind:'file_diff', path, diff?, additions?, deletions?} | " +
+            "{kind:'file_added', path, bytes?, preview?} | " +
+            "{kind:'file_removed', path} | " +
+            "{kind:'file_renamed', from, to} | " +
+            "{kind:'screenshot', path, caption?} | " +
+            "{kind:'log_excerpt', label, content} | " +
+            "{kind:'url', label, href} | " +
+            "{kind:'command_output', label, cmd, exit_code?, output} | " +
+            "{kind:'note', label, markdown}",
+          items: { type: "object" },
+          maxItems: 50,
+        },
+        follow_ups: {
+          type: "array",
+          description: "Plain-text follow-up items the reviewer should consider; surfaced as a list in the handoff panel.",
+          items: { type: "string", maxLength: 500 },
+          maxItems: 20,
+        },
+        metrics: {
+          type: "object",
+          description: "Optional self-reported metrics for the reviewer.",
+          properties: {
+            turns_used: { type: "number" },
+            files_touched: { type: "number" },
+            tests_passed: { type: "number" },
+            tests_failed: { type: "number" },
+          },
+        },
       },
       required: ["semantics", "summary"],
     },
@@ -141,22 +182,44 @@ const SuggestStateTransitionSchema = z.object({
 
 const CreateIssueSchema = z.object({
   title: z.string().min(1),
-  description: z.string().optional(),
+  description: nullishString(),
   priority: z.enum(["urgent", "high", "medium", "low"]).optional(),
-  state: z.string().optional(),
+  state: nullishString(),
   labels: z.array(z.string()).optional(),
   link_current_as_blocker: z.boolean().optional(),
 });
 
 const ActivateIssueSchema = z.object({
   issue_id: z.string().min(1),
-  target_state: z.string().optional(),
+  target_state: nullishString(),
 });
+
+const ArtifactSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file_diff"), path: z.string(), diff: z.string().max(64_000).optional(), additions: z.number().optional(), deletions: z.number().optional() }),
+  z.object({ kind: z.literal("file_added"), path: z.string(), bytes: z.number().optional(), preview: z.string().max(8000).optional() }),
+  z.object({ kind: z.literal("file_removed"), path: z.string() }),
+  z.object({ kind: z.literal("file_renamed"), from: z.string(), to: z.string() }),
+  z.object({ kind: z.literal("screenshot"), path: z.string(), caption: z.string().optional() }),
+  z.object({ kind: z.literal("log_excerpt"), label: z.string(), content: z.string().max(32_000) }),
+  z.object({ kind: z.literal("url"), label: z.string(), href: z.string().url() }),
+  z.object({ kind: z.literal("command_output"), label: z.string(), cmd: z.string(), exit_code: z.number().optional(), output: z.string().max(32_000) }),
+  z.object({ kind: z.literal("note"), label: z.string(), markdown: z.string().max(8000) }),
+]);
 
 const SessionCompletedSchema = z.object({
   semantics: z.enum(["success", "needs_retry", "handoff", "abandoned"]),
   summary: z.string(),
-  handoff_state: z.string().optional(),
+  handoff_state: nullishString(),
+  blocker_fingerprint: z.string().optional(),
+  termination_cause: z.string().optional(),
+  artifacts: z.array(ArtifactSchema).max(50).optional(),
+  follow_ups: z.array(z.string().max(500)).max(20).optional(),
+  metrics: z.object({
+    turns_used: z.number().optional(),
+    files_touched: z.number().optional(),
+    tests_passed: z.number().optional(),
+    tests_failed: z.number().optional(),
+  }).partial().optional(),
 });
 
 export async function handleTool(
@@ -263,7 +326,23 @@ export async function handleTool(
         semantics: parsed.semantics,
         summary: parsed.summary,
         handoff_state: parsed.handoff_state,
+        blocker_fingerprint: parsed.blocker_fingerprint,
+        termination_cause: parsed.termination_cause,
+        artifacts: parsed.artifacts,
+        follow_ups: parsed.follow_ups,
+        metrics: parsed.metrics,
       });
+
+      // Persist blocker_fingerprint to issues table for short-circuit logic
+      if (parsed.blocker_fingerprint) {
+        tracker.updateLastBlockerFingerprint(issueId, parsed.blocker_fingerprint);
+      }
+
+      // Clear fingerprint on success or handoff
+      if (parsed.semantics === "success" || parsed.semantics === "handoff") {
+        tracker.updateLastBlockerFingerprint(issueId, null);
+      }
+
       return { ok: true };
     }
 
