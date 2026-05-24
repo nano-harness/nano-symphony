@@ -1,5 +1,8 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import type { Logger } from "pino";
 import { runMigrations } from "../../src/db/migrations.ts";
 import { createTracker } from "../../src/db/tracker.ts";
@@ -29,14 +32,19 @@ describe("runWorker render failure handling", () => {
       id: "i1", identifier: "TEST-1", title: "t", state: "todo",
     });
 
+    const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-workspaces-"));
+
     // Template references an undefined variable → liquid renderPrompt will throw
     const workflow = {
-      workflow: { agent: { binary: "/nonexistent-binary" } } as any,
+      workflow: { agent: { binary: "/nonexistent-binary" }, workspace: { root: wsRoot, git_baseline: false } } as any,
       template: "Hello {{ does_not_exist.field }}",
     };
 
     await runWorker("i1", 0, {
-      tracker, workflow, logger: silentLogger, mcpUrl: "http://localhost:0/mcp",
+      tracker,
+      workflow,
+      logger: silentLogger,
+      mcpUrl: "http://localhost:0/mcp",
     });
 
     const events = tracker.getEvents().filter((e) => e.issue_id === "i1");

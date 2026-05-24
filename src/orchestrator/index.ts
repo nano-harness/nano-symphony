@@ -43,7 +43,7 @@ export interface Orchestrator {
 export function createOrchestrator(
   tracker: Tracker,
   getWorkflow: () => { workflow: Workflow; template: string } | undefined,
-  logger: Logger
+  logger: Logger,
 ): Orchestrator {
   let running = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -75,13 +75,13 @@ export function createOrchestrator(
         .map((c) => ({ issueId: c.id, attempt: 0 })),
     ];
 
-    for (const { issueId, attempt } of toDispatch) {
-      const ctx: WorkerContext = {
-        tracker,
-        workflow: wf,
-        logger,
-        mcpUrl,
-      };
+	    for (const { issueId, attempt } of toDispatch) {
+	      const ctx: WorkerContext = {
+	        tracker,
+	        workflow: wf,
+	        logger,
+	        mcpUrl,
+	      };
 
       void sem.acquire().then(() => {
         return runWorker(issueId, attempt, ctx).finally(() => sem.release());

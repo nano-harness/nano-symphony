@@ -176,11 +176,11 @@ async function main() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        identifier: "e2e/mock",
+        identifier: "E2E-1",
         title: "E2E debug issue",
         description: "Created by scripts/e2e-debug.ts",
         priority: "medium",
-        state: "open",
+        state: "todo",
         labels: ["e2e"],
       }),
     });

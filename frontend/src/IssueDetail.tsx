@@ -16,33 +16,28 @@ export function IssueDetail() {
   const [toast, setToast] = createSignal<{ message: string; type: "success" | "error" } | null>(null);
 
   const load = async () => {
-    const [i, e, runs] = await Promise.all([api.getIssue(params.id), api.getEvents(), api.getRuns()]);
+    const [i, e, r] = await Promise.all([
+      api.getIssue(params.id),
+      api.getEvents(),
+      api.getRun(params.id).catch(() => null),
+    ]);
     setIssue(i);
     setEvents(e.filter((ev) => ev.issue_id === params.id).sort((a, b) => a.ts - b.ts));
-    const currentRun = runs.find(r => r.issue_id === params.id);
-    setRun(currentRun || null);
+    setRun(r);
   };
 
   // Refresh issue and run data (for live updates)
   const refreshIssueAndRun = async () => {
     try {
-      const [i, runs] = await Promise.all([api.getIssue(params.id), api.getRuns()]);
+      const [i, r] = await Promise.all([
+        api.getIssue(params.id),
+        api.getRun(params.id).catch(() => null),
+      ]);
       setIssue(i);
-      const currentRun = runs.find(r => r.issue_id === params.id);
-      setRun(currentRun || null);
+      setRun(r);
     } catch (err) {
       // Silently ignore refresh errors to avoid breaking the refresh chain
     }
-  };
-
-  // Debounced refresh scheduler
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  const scheduleRefresh = () => {
-    if (refreshTimer !== null) return; // Already scheduled
-    refreshTimer = setTimeout(() => {
-      refreshTimer = null;
-      refreshIssueAndRun();
-    }, 400);
   };
 
   onMount(() => {
@@ -59,41 +54,74 @@ export function IssueDetail() {
             if (prev.some((ev) => ev.id === event.id)) return prev;
             return [...prev, event].sort((a, b) => a.ts - b.ts);
           });
-          // Trigger refresh after event is queued
-          scheduleRefresh();
         }
       } catch {}
     });
 
+    // Listen to run events for immediate state updates
+    eventsSource.addEventListener("run", (e) => {
+      try {
+        const runPatch = JSON.parse(e.data) as Partial<SymphonyRun> & { issue_id: string };
+        if (runPatch.issue_id === params.id) {
+          setRun((prev) => {
+            if (!prev) return prev;
+            return { ...prev, ...runPatch };
+          });
+        }
+      } catch {}
+    });
+
+    // Fallback poller in case SSE disconnects
+    const fallbackInterval = setInterval(refreshIssueAndRun, 10000);
+
     onCleanup(() => {
       eventsSource.close();
-      if (refreshTimer !== null) {
-        clearTimeout(refreshTimer);
-        refreshTimer = null;
-      }
+      clearInterval(fallbackInterval);
     });
   });
 
   // Setup logs SSE with createEffect to handle run changes
   let logsSource: EventSource | null = null;
   let wiredAttempt: number | null = null;
+  let logBackoff = 1000;
+
+  const reconnectLogs = (attempt: number) => {
+    if (logsSource) logsSource.close();
+    logsSource = api.streamLogs(params.id, attempt);
+    attachLogListeners(attempt);
+  };
+
+  const attachLogListeners = (attempt: number) => {
+    if (!logsSource) return;
+
+    logsSource.addEventListener("log", (e: MessageEvent) => {
+      setLogs((prev) => prev + e.data);
+      logBackoff = 1000; // Reset backoff on successful message
+    });
+
+    logsSource.addEventListener("end", () => {
+      if (logsSource) logsSource.close();
+    });
+
+    logsSource.addEventListener("error", () => {
+      if (logsSource) logsSource.close();
+      // Retry with exponential backoff
+      setTimeout(() => reconnectLogs(attempt), logBackoff);
+      logBackoff = Math.min(logBackoff * 2, 10000);
+    });
+  };
 
   createEffect(() => {
     const r = run();
-    if (!r) return;
-    if (wiredAttempt === r.next_attempt) return; // Same attempt, don't resubscribe
+    if (!r || r.current_attempt === null) return;
+    if (wiredAttempt === r.current_attempt) return; // Same attempt, don't resubscribe
     if (logsSource) {
       logsSource.close();
       setLogs("");
     }
-    wiredAttempt = r.next_attempt;
-    logsSource = api.streamLogs(params.id, r.next_attempt);
-    logsSource.addEventListener("log", (e: MessageEvent) => {
-      setLogs((prev) => prev + e.data);
-    });
-    logsSource.addEventListener("error", (e) => {
-      console.warn("Logs SSE error:", e);
-    });
+    wiredAttempt = r.current_attempt;
+    logBackoff = 1000; // Reset backoff for new attempt
+    reconnectLogs(r.current_attempt);
   });
 
   onCleanup(() => {
@@ -228,6 +256,34 @@ export function IssueDetail() {
               <div class="aside-label">Priority</div>
               <div class="aside-value">{issue()!.priority}</div>
             </div>
+            <div class="aside-field">
+              <div class="aside-label">Agent</div>
+              <div class="aside-value">{issue()!.agent_kind ?? "workflow default"}</div>
+            </div>
+            <Show when={issue()!.agent_binary}>
+              <div class="aside-field">
+                <div class="aside-label">Agent binary</div>
+                <div class="aside-value-mono">{issue()!.agent_binary}</div>
+              </div>
+            </Show>
+            <div class="aside-field">
+              <div class="aside-label">Sandbox</div>
+              <div class="aside-value">
+                {issue()!.sandbox_mode === "off"
+                  ? "Disabled (per-issue)"
+                  : issue()!.agent_kind === "claude-code"
+                    ? "⚠ Unmanaged (claude-code)"
+                    : "Default"}
+              </div>
+            </div>
+            <Show when={(issue()!.sandbox_extra_writable_paths ?? []).length > 0}>
+              <div class="aside-field">
+                <div class="aside-label">Extra writable</div>
+                <div class="aside-value-mono" style="font-size: 11px;">
+                  {(issue()!.sandbox_extra_writable_paths ?? []).map((p) => <div>{p}</div>)}
+                </div>
+              </div>
+            </Show>
             <Show when={run()}>
               <div class="aside-field">
                 <div class="aside-label">Attempt</div>

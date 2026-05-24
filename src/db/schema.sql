@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS issues (
   workspace_path TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  last_blocker_fingerprint TEXT
+  last_blocker_fingerprint TEXT,
+  agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind IN ('nano', 'claude-code')),
+  agent_binary TEXT
 );
 
 CREATE TABLE IF NOT EXISTS issue_labels (
@@ -30,6 +32,7 @@ CREATE TABLE IF NOT EXISTS issue_blockers (
 CREATE TABLE IF NOT EXISTS symphony_runs (
   issue_id TEXT PRIMARY KEY,
   next_attempt INTEGER DEFAULT 0,
+  current_attempt INTEGER,
   last_state TEXT DEFAULT 'released',
   last_issue_state TEXT DEFAULT '',
   workspace_path TEXT DEFAULT '',

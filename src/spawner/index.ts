@@ -1,5 +1,14 @@
 import path from "path";
 import fs from "fs/promises";
+import type { SpawnContext } from "./types.ts";
+import type { AgentResultSummary, AgentArtifacts } from "./agent-result-payload.ts";
+import { getAdapter, type AgentKind } from "./agent-adapter.ts";
+
+// Eagerly import adapters so they self-register
+import "./adapters/nano.ts";
+import "./adapters/claude-code.ts";
+
+export type { SpawnContext } from "./types.ts";
 
 export interface SpawnOptions {
   issueId: string;
@@ -10,40 +19,27 @@ export interface SpawnOptions {
   mcpUrl: string;
   binary: string;
   timeoutMs: number;
+  agentKind?: AgentKind;
+  logger?: { warn: (obj: unknown, msg: string) => void };
   sandboxConfig?: {
     backend: "native" | "docker" | "none";
     network_access: boolean;
     extra_read_only_paths: string[];
     extra_writable_paths: string[];
+    extra_denied_paths: string[];
     docker_image?: string;
     docker_runtime?: string;
   };
-}
-
-export interface NanoSentinel {
-  status: "success" | "needs_retry" | "abandoned" | "timeout";
-  exit_code?: number;
-  duration_ms?: number;
-  tool_calls?: number;
-  tokens?: { input: number; output: number };
-  reason?: string;
-  termination_cause?: string;
-  blocker_fingerprint?: string;
-  goal_state?: {
-    condition: string;
-    achieved_at?: string | null;
-    started_at?: string;
-    turns_evaluated?: number;
-    tokens_spent?: number;
-    max_turns?: number;
-    last_reason?: string;
-  };
-  cache_key?: string;
-  sandbox?: {
-    enabled: boolean;
-    backend: "none" | "native" | "docker";
-    backend_detail?: string;
-    network: "inherited" | "allowed" | "denied";
+  permissionMode?: string;
+  permissionAuto?: {
+    backend: "llm" | "fail_closed";
+    model?: string;
+    confidence_threshold: number;
+    timeout_seconds: number;
+    cache_ttl_minutes: number;
+    allow_rules: string[];
+    denial_max_consecutive: number;
+    denial_max_total: number;
   };
 }
 
@@ -51,51 +47,9 @@ export interface SpawnResult {
   exitCode: number | null;
   killedByTimeout: boolean;
   duration_ms: number;
-  sentinel: NanoSentinel | null;
+  agentResult: AgentResultSummary | null;
+  artifacts: AgentArtifacts;
 }
-
-// Bound to nano-agent's streamable HTTP MCP transport and env-expanded headers.
-const nanoAgentConfig = (mcpUrl: string, sandboxConfig?: SpawnOptions["sandboxConfig"]) => {
-  const sandbox = sandboxConfig ?? {
-    backend: "native",
-    network_access: true,
-    extra_read_only_paths: [],
-    extra_writable_paths: [],
-  };
-
-  // Ensure arrays are defined even if sandboxConfig is partially specified
-  const extraReadOnlyPaths = sandbox.extra_read_only_paths ?? [];
-  const extraWritablePaths = sandbox.extra_writable_paths ?? [];
-
-  const renderYamlList = (key: string, values: string[]) => {
-    if (values.length === 0) return `  ${key}: []`;
-    return [`  ${key}:`, ...values.map((p) => `    - ${JSON.stringify(p)}`)].join("\n");
-  };
-
-  const dockerLines = [
-    sandbox.backend === "docker" ? `  docker_image: ${JSON.stringify(sandbox.docker_image ?? "ubuntu:24.04")}` : null,
-    sandbox.backend === "docker" && sandbox.docker_runtime
-      ? `  docker_runtime: ${JSON.stringify(sandbox.docker_runtime)}`
-      : null,
-  ].filter((line): line is string => line !== null);
-
-  return `mcpServers:
-  symphony:
-    url: "${mcpUrl}"
-    transport: streamable
-    headers:
-      # Keep this literal so nano-agent expands SYMPHONY_TOKEN in the child process.
-      X-Symphony-Token: "\${env:SYMPHONY_TOKEN}"
-
-sandbox:
-  enabled: ${sandbox.backend !== "none"}
-  backend: ${sandbox.backend}
-  network_access: ${sandbox.network_access}
-${renderYamlList("extra_read_only_paths", extraReadOnlyPaths)}
-${renderYamlList("extra_writable_paths", extraWritablePaths)}
-${dockerLines.length > 0 ? `\n${dockerLines.join("\n")}` : ""}
-`;
-};
 
 // Exit codes aligned with nano-agent pkg/cli/binary.go:31-36
 export const NANO_EXIT = {
@@ -106,62 +60,55 @@ export const NANO_EXIT = {
   UNCLASSIFIED: 1,
 } as const;
 
-// Must match nano-agent's binaryResultSentinel (pkg/cli/binary.go:26).
-// DO NOT change without verifying against nano-agent source — the unit test
-// in tests/unit/sentinel-prefix.test.ts encodes the actual value as a string
-// literal that future drift will turn red.
-const SENTINEL_PREFIX = "<<<NANO_RESULT>>>";
-
-function extractSentinelFromText(text: string): NanoSentinel | null {
-  try {
-    const lines = text.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const idx = lines[i].indexOf(SENTINEL_PREFIX);
-      if (idx >= 0) {
-        const json = lines[i].slice(idx + SENTINEL_PREFIX.length).trim();
-        return JSON.parse(json) as NanoSentinel;
-      }
-    }
-  } catch {
-    // sentinel 缺失或解析失败一律视为 null，让 worker 走兜底路径
-  }
-  return null;
-}
-
-// Extracts sentinel from stderr first (success path), then falls back to stdout (failure path).
-// This matches nano-agent's contract: success writes to stderr, failure writes to stdout.
-function extractSentinel(stdout: string, stderr: string): NanoSentinel | null {
-  return extractSentinelFromText(stderr) ?? extractSentinelFromText(stdout);
-}
-
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig } = opts;
+  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig, permissionMode, permissionAuto, logger } = opts;
+  const agentKind: AgentKind = opts.agentKind ?? "nano";
+  const adapter = getAdapter(agentKind);
 
-  await fs.writeFile(path.join(workspace, ".nano.yaml"), nanoAgentConfig(mcpUrl, sandboxConfig), "utf-8");
+  const outputDir = path.join(workspace, ".nano-out");
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const ctx: SpawnContext = {
+    issueId,
+    attempt,
+    workspace,
+    prompt,
+    token,
+    mcpUrl,
+    binary,
+    timeoutMs,
+    outputDir,
+    sandboxConfig,
+    permissionMode,
+    permissionAuto,
+    logger,
+  };
+
+  // Write workspace files produced by the adapter
+  const files = adapter.renderWorkspaceFiles(ctx);
+  for (const file of files) {
+    const filePath = path.join(workspace, file.path);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, file.contents, { encoding: "utf-8", mode: file.mode });
+  }
 
   const logsDir = path.join(workspace, "logs");
   await fs.mkdir(logsDir, { recursive: true });
   const logFile = path.join(logsDir, `attempt-${attempt}.log`);
 
+  // Build spawn invocation from adapter
+  const invocation = adapter.buildSpawnInvocation(ctx);
+
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v != null) as [string, string][]),
-    SYMPHONY_ISSUE_ID: issueId,
-    SYMPHONY_WORKSPACE: workspace,
-    SYMPHONY_TOKEN: token,
-    SYMPHONY_MCP_URL: mcpUrl,
-    // Sandbox must allow network access for MCP loopback to symphony.
-    // Explicitly override any user global environment variables.
-    NANO_SANDBOX_NETWORK_ACCESS: "true",
-    // Explicitly enable sandbox (double insurance with --sandbox=on flag).
-    NANO_SANDBOX_ENABLED: "true",
-    NANO_SANDBOX_BACKEND: sandboxConfig?.backend ?? "native",
+    ...invocation.env,
   };
 
   const startedAt = Date.now();
   let killedByTimeout = false;
 
-  // Use pipes to capture stdout/stderr in-memory (eliminates flush race)
-  const proc = Bun.spawn([binary, "binary", "exec", "--sandbox=on"], {
+  // Use pipes to capture stdout/stderr
+  const proc = Bun.spawn(invocation.argv, {
     cwd: workspace,
     env,
     stdin: "pipe",
@@ -171,9 +118,15 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   proc.stdin.write(prompt);
   proc.stdin.end();
 
-  // Collect stdout and stderr chunks
+  // Open log file for streaming writes
+  const { createWriteStream } = await import("node:fs");
+  const { finished } = await import("node:stream/promises");
+
+  const logStream = createWriteStream(logFile, { flags: "w" });
+  logStream.write("--- log start ---\n");
+
+  // Capture stdout fully for result parsing
   const stdoutChunks: Uint8Array[] = [];
-  const stderrChunks: Uint8Array[] = [];
 
   const stdoutPromise = (async () => {
     const reader = proc.stdout.getReader();
@@ -182,6 +135,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         const { done, value } = await reader.read();
         if (done) break;
         stdoutChunks.push(value);
+        logStream.write(value);
       }
     } finally {
       reader.releaseLock();
@@ -194,7 +148,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        stderrChunks.push(value);
+        logStream.write("[err] ");
+        logStream.write(value);
       }
     } finally {
       reader.releaseLock();
@@ -212,15 +167,17 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Wait for all output to be collected
   await Promise.all([stdoutPromise, stderrPromise]);
 
-  // Decode collected output
-  const stdoutText = new TextDecoder().decode(Buffer.concat(stdoutChunks.map(c => Buffer.from(c))));
-  const stderrText = new TextDecoder().decode(Buffer.concat(stderrChunks.map(c => Buffer.from(c))));
+  // Close the log stream
+  logStream.end();
+  await finished(logStream);
 
-  // Write combined log file for debugging
-  await Bun.write(logFile, `--- stdout ---\n${stdoutText}\n--- stderr ---\n${stderrText}`);
+  // Parse result from stdout
+  const decoder = new TextDecoder();
+  const stdoutText = stdoutChunks.map(c => decoder.decode(c, { stream: true })).join("") + decoder.decode();
+  const agentResult = adapter.parseResult(stdoutText);
 
-  // Extract sentinel from stderr first (success path), then stdout (failure path)
-  const sentinel = extractSentinel(stdoutText, stderrText);
+  // Collect artifacts
+  const artifacts = await adapter.collectArtifacts(ctx);
 
-  return { exitCode, killedByTimeout, duration_ms: Date.now() - startedAt, sentinel };
+  return { exitCode, killedByTimeout, duration_ms: Date.now() - startedAt, agentResult, artifacts };
 }

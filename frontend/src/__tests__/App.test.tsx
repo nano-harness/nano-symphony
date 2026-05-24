@@ -110,3 +110,48 @@ describe("StatusBar", () => {
     expect(linkElement?.getAttribute("href")).toBe("/");
   });
 });
+
+describe("Dashboard view toggle", () => {
+  beforeEach(() => {
+    cleanup();
+    localStorage.removeItem("symphony.dashboardView");
+    window.history.pushState({}, "", "/");
+  });
+
+  it("defaults to list view and can switch to board", async () => {
+    render(() => <App />);
+    // List view should be visible by default
+    expect(await screen.findByText(/the score/i)).toBeInTheDocument();
+    expect(screen.getByTitle("List view")).toBeInTheDocument();
+    expect(screen.getByTitle("Board view")).toBeInTheDocument();
+  });
+
+  it("persists view mode to localStorage when toggled", async () => {
+    render(() => <App />);
+    const boardBtn = await screen.findByTitle("Board view");
+    boardBtn.click();
+    expect(localStorage.getItem("symphony.dashboardView")).toBe("board");
+  });
+
+  it("restores board view from localStorage on mount", async () => {
+    localStorage.setItem("symphony.dashboardView", "board");
+    render(() => <App />);
+    // Board should be visible (look for board column labels)
+    expect(await screen.findByText("BACKLOG")).toBeInTheDocument();
+    expect(screen.getByText("IN PROGRESS")).toBeInTheDocument();
+    // All empty columns show "— rest —"
+    const empties = screen.getAllByText("— rest —");
+    expect(empties.length).toBe(6);
+  });
+
+  it("hides state chips in board mode", async () => {
+    render(() => <App />);
+    // State chips should be visible in list mode
+    expect(await screen.findByText("ACTIVE")).toBeInTheDocument();
+    // Switch to board
+    const boardBtn = screen.getByTitle("Board view");
+    boardBtn.click();
+    // The state-chip "ACTIVE" should no longer be visible (board doesn't have ACTIVE column)
+    expect(screen.queryByText("ACTIVE")).not.toBeInTheDocument();
+  });
+});

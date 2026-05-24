@@ -15,6 +15,12 @@ export function IssueModal(props: IssueModalProps) {
   const [state, setState] = createSignal(props.issue?.state || "todo");
   const [labels, setLabels] = createSignal((props.issue?.labels || []).join(", "));
   const [workspacePath, setWorkspacePath] = createSignal(props.issue?.workspace_path || "");
+  const [agentKind, setAgentKind] = createSignal<string>(props.issue?.agent_kind ?? "");
+  const [agentBinary, setAgentBinary] = createSignal(props.issue?.agent_binary ?? "");
+  const [sandboxMode, setSandboxMode] = createSignal<string>(props.issue?.sandbox_mode ?? "");
+  const [sandboxExtraWritablePaths, setSandboxExtraWritablePaths] = createSignal(
+    (props.issue?.sandbox_extra_writable_paths || []).join("\n")
+  );
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [touched, setTouched] = createSignal({ title: false });
@@ -42,6 +48,13 @@ export function IssueModal(props: IssueModalProps) {
         priority: priority(),
         state: state(),
         workspace_path: workspacePath().trim() || undefined,
+        agent_kind: agentKind() === "" ? null : (agentKind() as "nano" | "claude-code"),
+        agent_binary: agentBinary().trim() || null,
+        sandbox_mode: sandboxMode() === "" ? null : (sandboxMode() as "default" | "off"),
+        sandbox_extra_writable_paths: sandboxExtraWritablePaths()
+          .split("\n")
+          .map((p) => p.trim())
+          .filter((p) => p),
         labels: labels()
           .split(",")
           .map((l) => l.trim())
@@ -154,6 +167,86 @@ export function IssueModal(props: IssueModalProps) {
                 </select>
               </div>
             </div>
+
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label" for="agent_kind">
+                  Agent
+                </label>
+                <select
+                  id="agent_kind"
+                  class="form-select"
+                  value={agentKind()}
+                  onChange={(e) => setAgentKind(e.currentTarget.value)}
+                >
+                  <option value="">Workflow default</option>
+                  <option value="nano">nano-agent</option>
+                  <option value="claude-code">Claude Code</option>
+                </select>
+              </div>
+
+              <div class="form-field">
+                <label class="form-label" for="agent_binary">
+                  Agent binary
+                </label>
+                <input
+                  id="agent_binary"
+                  type="text"
+                  class="form-input"
+                  value={agentBinary()}
+                  onInput={(e) => setAgentBinary(e.currentTarget.value)}
+                  placeholder="Default (auto)"
+                />
+              </div>
+            </div>
+
+            <Show when={agentKind() === "claude-code"}>
+              <div class="form-hint" style="color: var(--color-warning, #b08800); margin-bottom: 8px;">
+                ⚠ Sandbox features are managed by Claude Code; per-issue overrides are not applied.
+              </div>
+            </Show>
+
+            <Show when={agentKind() !== "claude-code"}>
+              <div class="form-row">
+                <div class="form-field">
+                  <label class="form-label" for="sandbox_mode">
+                    Sandbox
+                  </label>
+                  <select
+                    id="sandbox_mode"
+                    class="form-select"
+                    value={sandboxMode()}
+                    onChange={(e) => setSandboxMode(e.currentTarget.value)}
+                  >
+                    <option value="">Default</option>
+                    <option value="off">Disabled</option>
+                  </select>
+                </div>
+              </div>
+
+              <Show when={sandboxMode() === "off"}>
+                <div class="form-hint" style="color: var(--color-error, #cc3333); margin-bottom: 8px;">
+                  <strong>⚠ Sandbox disabled.</strong> Filesystem and network isolation are off for this issue.
+                  The worker will floor <code>permission_mode</code> to <code>auto</code> (or <code>default</code> if
+                  <code>permission_auto</code> is not configured) — <code>acceptEdits</code> and <code>yolo</code> are
+                  forbidden in this mode and will be silently raised.
+                </div>
+              </Show>
+
+              <div class="form-field">
+                <label class="form-label" for="sandbox_extra_writable_paths">
+                  Extra writable paths
+                </label>
+                <textarea
+                  id="sandbox_extra_writable_paths"
+                  class="form-textarea"
+                  value={sandboxExtraWritablePaths()}
+                  onInput={(e) => setSandboxExtraWritablePaths(e.currentTarget.value)}
+                  placeholder="One path per line (optional)"
+                  rows="2"
+                />
+              </div>
+            </Show>
 
             <div class="form-field">
               <label class="form-label" for="labels">

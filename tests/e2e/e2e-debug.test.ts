@@ -34,12 +34,13 @@ describe("e2e debug", () => {
   );
 
   test(
-    "skip session_completed with clean exit triggers handoff path",
+    "skip session_completed with clean exit triggers abandoned path",
     async () => {
       const res = await runE2e({ mockSkipComplete: true, timeoutSec: 15 });
-      expect(res.run.last_state).toBe("in_review");
+      expect(res.run.last_state).toBe("released");
       expect(res.events.some((e) => e.kind === "session_completed")).toBe(false);
-      expect(res.events.some((e) => e.kind === "handoff")).toBe(true);
+      // Without stdout result or session_completed, agent is abandoned
+      expect(res.events.some((e) => e.kind === "abandoned")).toBe(true);
     },
     30_000
   );

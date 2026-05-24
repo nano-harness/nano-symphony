@@ -84,4 +84,64 @@ export function runMigrations(db: Database): void {
   } catch {
     // ignore
   }
+
+  // 2026-05: symphony_runs.current_attempt
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "current_attempt")) {
+      db.exec("ALTER TABLE symphony_runs ADD COLUMN current_attempt INTEGER");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: symphony_runs.last_patch
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "last_patch")) {
+      db.exec("ALTER TABLE symphony_runs ADD COLUMN last_patch TEXT DEFAULT NULL");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.agent_kind
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "agent_kind")) {
+      db.exec("ALTER TABLE issues ADD COLUMN agent_kind TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.agent_binary
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "agent_binary")) {
+      db.exec("ALTER TABLE issues ADD COLUMN agent_binary TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.sandbox_mode
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "sandbox_mode")) {
+      db.exec("ALTER TABLE issues ADD COLUMN sandbox_mode TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.sandbox_extra_writable_paths (JSON-encoded string[])
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "sandbox_extra_writable_paths")) {
+      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_writable_paths TEXT");
+    }
+  } catch {
+    // ignore
+  }
 }

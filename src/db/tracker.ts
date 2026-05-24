@@ -1,5 +1,7 @@
 import { Database } from "bun:sqlite";
 import { nanoid } from "nanoid";
+import { bus } from "./event_bus.ts";
+import type { RunPatch } from "./event_bus.ts";
 
 export interface Issue {
   id: string;
@@ -11,6 +13,10 @@ export interface Issue {
   branch: string | null;
   url: string | null;
   workspace_path: string | null;
+  agent_kind: "nano" | "claude-code" | null;
+  agent_binary: string | null;
+  sandbox_mode: "default" | "off" | null;
+  sandbox_extra_writable_paths: string[];
   created_at: string;
   updated_at: string;
   labels: string[];
@@ -27,12 +33,17 @@ export interface IssueInput {
   branch?: string | null;
   url?: string | null;
   workspace_path?: string | null;
+  agent_kind?: "nano" | "claude-code" | null;
+  agent_binary?: string | null;
+  sandbox_mode?: "default" | "off" | null;
+  sandbox_extra_writable_paths?: string[];
   labels?: string[];
 }
 
 export interface SymphonyRun {
   issue_id: string;
   next_attempt: number;
+  current_attempt: number | null;
   last_state: string;
   last_issue_state: string;
   workspace_path: string;
@@ -57,8 +68,8 @@ export interface SymphonyEvent {
 
 export function createTracker(db: Database) {
   const insertIssueStmt = db.prepare(`
-    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, agent_binary, sandbox_mode, sandbox_extra_writable_paths, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertLabelStmt = db.prepare(`
@@ -221,6 +232,14 @@ export function createTracker(db: Database) {
     UPDATE symphony_runs SET workspace_path = ?, workspace_managed = ? WHERE issue_id = ?
   `);
 
+  const markCurrentAttemptStmt = db.prepare(`
+    UPDATE symphony_runs SET current_attempt = ? WHERE issue_id = ?
+  `);
+
+  const recordPatchStmt = db.prepare(`
+    UPDATE symphony_runs SET last_patch = ? WHERE issue_id = ?
+  `);
+
   const updateLastBlockerFingerprintStmt = db.prepare(`
     UPDATE issues SET last_blocker_fingerprint = ? WHERE id = ?
   `);
@@ -229,9 +248,19 @@ export function createTracker(db: Database) {
     SELECT last_blocker_fingerprint FROM issues WHERE id = ?
   `);
 
+  function hydrateIssueRow(base: Record<string, unknown>): Omit<Issue, "labels" | "blockers"> {
+    const row = base as Omit<Issue, "labels" | "blockers" | "sandbox_extra_writable_paths"> & { sandbox_extra_writable_paths: string | null };
+    let paths: string[] = [];
+    if (row.sandbox_extra_writable_paths) {
+      try { paths = JSON.parse(row.sandbox_extra_writable_paths); } catch { /* ignore */ }
+    }
+    return { ...row, sandbox_extra_writable_paths: paths };
+  }
+
   function getIssue(id: string): Issue | null {
-    const base = getIssueBaseStmt.get(id) as Omit<Issue, "labels" | "blockers"> | null;
-    if (!base) return null;
+    const raw = getIssueBaseStmt.get(id) as Record<string, unknown> | null;
+    if (!raw) return null;
+    const base = hydrateIssueRow(raw);
     const labels = (getLabelsStmt.all(id) as { label: string }[]).map((r) => r.label);
     const blockers = getBlockersStmt.all(id) as Array<{ blocker_id: string; blocker_state: string }>;
     return { ...base, labels, blockers };
@@ -254,6 +283,10 @@ export function createTracker(db: Database) {
       issue.branch ?? null,
       issue.url ?? null,
       issue.workspace_path ?? null,
+      issue.agent_kind ?? null,
+      issue.agent_binary ?? null,
+      issue.sandbox_mode ?? null,
+      issue.sandbox_extra_writable_paths?.length ? JSON.stringify(issue.sandbox_extra_writable_paths) : null,
       (issue as { created_at?: string }).created_at ?? now,
       (issue as { updated_at?: string }).updated_at ?? now,
     );
@@ -272,13 +305,14 @@ export function createTracker(db: Database) {
   }
 
   function listIssues(filter?: { state?: string }): Issue[] {
-    let rows: Omit<Issue, "labels" | "blockers">[];
+    let rows: Record<string, unknown>[];
     if (filter?.state) {
-      rows = listIssuesByStateStmt.all(filter.state) as Omit<Issue, "labels" | "blockers">[];
+      rows = listIssuesByStateStmt.all(filter.state) as Record<string, unknown>[];
     } else {
-      rows = listIssuesStmt.all() as Omit<Issue, "labels" | "blockers">[];
+      rows = listIssuesStmt.all() as Record<string, unknown>[];
     }
-    return rows.map((row) => {
+    return rows.map((raw) => {
+      const row = hydrateIssueRow(raw);
       const labels = (getLabelsStmt.all(row.id) as { label: string }[]).map((r) => r.label);
       const blockers = getBlockersStmt.all(row.id) as Array<{ blocker_id: string; blocker_state: string }>;
       return { ...row, labels, blockers };
@@ -287,8 +321,9 @@ export function createTracker(db: Database) {
 
   function getCandidates(limit: number): Issue[] {
     const now = Date.now();
-    const rows = getCandidatesStmt.all(now, limit) as Omit<Issue, "labels" | "blockers">[];
-    return rows.map((row) => {
+    const rows = getCandidatesStmt.all(now, limit) as Record<string, unknown>[];
+    return rows.map((raw) => {
+      const row = hydrateIssueRow(raw);
       const labels = (getLabelsStmt.all(row.id) as { label: string }[]).map((r) => r.label);
       const blockers = getBlockersStmt.all(row.id) as Array<{ blocker_id: string; blocker_state: string }>;
       return { ...row, labels, blockers };
@@ -297,11 +332,15 @@ export function createTracker(db: Database) {
 
   function claimIssue(issueId: string, attempt: number): boolean {
     const result = claimIssueStmt.run(issueId, attempt);
+    if (result.changes > 0) {
+      bus.emit("run", { issue_id: issueId, next_attempt: attempt, last_state: "claimed" });
+    }
     return result.changes > 0;
   }
 
   function releaseIssue(issueId: string, state: string): void {
     releaseIssueStmt.run(state, issueId);
+    bus.emit("run", { issue_id: issueId, last_state: state });
   }
 
   function updateLastIssueState(issueId: string, issueState: string): void {
@@ -310,11 +349,12 @@ export function createTracker(db: Database) {
 
   function scheduleRetry(issueId: string, nextDueTs: number, attempt: number): void {
     scheduleRetryStmt.run(nextDueTs, attempt, issueId);
+    bus.emit("run", { issue_id: issueId, last_state: "retry_queued", next_due_ts: nextDueTs, next_attempt: attempt });
   }
 
   function fetchDueRetries(now: number): SymphonyRun[] {
-    const runs = fetchDueRetriesStmt.all(now) as Array<Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }>;
-    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1 }));
+    const runs = fetchDueRetriesStmt.all(now) as Array<Omit<SymphonyRun, "workspace_managed" | "current_attempt"> & { workspace_managed: number; current_attempt: number | null }>;
+    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1, current_attempt: r.current_attempt }));
   }
 
   function recordEvent(issueId: string, kind: string, message: string, payload?: unknown): void {
@@ -322,21 +362,24 @@ export function createTracker(db: Database) {
     const ts = Date.now();
     const payloadJson = payload !== undefined ? JSON.stringify(payload) : null;
     recordEventStmt.run(id, issueId, ts, kind, message, payloadJson);
+    // Emit event on bus after DB write succeeds
+    bus.emit("event", { id, issue_id: issueId, ts, kind, message, payload_json: payloadJson });
   }
 
   function updateTokenStats(issueId: string, input: number, output: number, total: number): void {
     updateTokenStatsStmt.run(input, output, total, issueId);
+    bus.emit("run", { issue_id: issueId, token_input: input, token_output: output, token_total: total });
   }
 
   function getActiveRuns(): SymphonyRun[] {
-    const runs = getActiveRunsStmt.all() as Array<Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }>;
-    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1 }));
+    const runs = getActiveRunsStmt.all() as Array<Omit<SymphonyRun, "workspace_managed" | "current_attempt"> & { workspace_managed: number; current_attempt: number | null }>;
+    return runs.map((r) => ({ ...r, workspace_managed: r.workspace_managed === 1, current_attempt: r.current_attempt }));
   }
 
   function getRun(issueId: string): SymphonyRun | null {
-    const run = getRunStmt.get(issueId) as (Omit<SymphonyRun, "workspace_managed"> & { workspace_managed: number }) | null;
+    const run = getRunStmt.get(issueId) as (Omit<SymphonyRun, "workspace_managed" | "current_attempt"> & { workspace_managed: number; current_attempt: number | null }) | null;
     if (!run) return null;
-    return { ...run, workspace_managed: run.workspace_managed === 1 };
+    return { ...run, workspace_managed: run.workspace_managed === 1, current_attempt: run.current_attempt };
   }
 
   function getEvents(since?: number): SymphonyEvent[] {
@@ -352,6 +395,16 @@ export function createTracker(db: Database) {
 
   function updateWorkspacePath(issueId: string, wsPath: string, managed: boolean): void {
     updateWorkspacePathStmt.run(wsPath, managed ? 1 : 0, issueId);
+    bus.emit("run", { issue_id: issueId, workspace_path: wsPath, workspace_managed: managed });
+  }
+
+  function markCurrentAttempt(issueId: string, attempt: number): void {
+    markCurrentAttemptStmt.run(attempt, issueId);
+    bus.emit("run", { issue_id: issueId, current_attempt: attempt });
+  }
+
+  function recordPatch(issueId: string, attempt: number, patch: string | null): void {
+    recordPatchStmt.run(patch, issueId);
   }
 
   function deleteIssue(id: string): boolean {
@@ -393,6 +446,8 @@ export function createTracker(db: Database) {
     getEvents,
     getLatestEventByKind,
     updateWorkspacePath,
+    markCurrentAttempt,
+    recordPatch,
     deleteIssue,
     updateLastBlockerFingerprint,
     getLastBlockerFingerprint,

@@ -3,19 +3,89 @@ import type { Workflow } from "../workflow/types.ts";
 import { ensureWorkspace, runHook } from "../workspace/manager.ts";
 import { renderPrompt } from "../prompt/renderer.ts";
 import { issueToken, revokeToken } from "../mcp/auth.ts";
-import { spawnAgent, NANO_EXIT } from "../spawner/index.ts";
+import { spawnAgent } from "../spawner/index.ts";
 import type { SpawnResult } from "../spawner/index.ts";
 import { calculateBackoff } from "./backoff.ts";
-import { collectWorkspaceDiff } from "./diff.ts";
 import { appendRunLog } from "./run_log.ts";
-import { config } from "../config.ts";
 import type { Logger } from "pino";
+import type { AgentResultSummary } from "../spawner/agent-result-payload.ts";
 
 export interface WorkerContext {
   tracker: Tracker;
   workflow: { workflow: Workflow; template: string };
   logger: Logger;
   mcpUrl: string;
+  spawn?: typeof spawnAgent;
+}
+
+/**
+ * Resolves sandbox config and permission mode from workflow + per-issue overrides.
+ * Exported for unit testing. Called internally by runWorker.
+ */
+export function resolveSandboxAndPermission(
+  agentKind: "nano" | "claude-code",
+  issue: { sandbox_mode?: "default" | "off" | null; sandbox_extra_writable_paths?: string[] },
+  agentConfig: Workflow["agent"] | undefined,
+): {
+  sandboxConfig: {
+    backend: "native" | "docker" | "none";
+    network_access: boolean;
+    extra_read_only_paths: string[];
+    extra_writable_paths: string[];
+    extra_denied_paths: string[];
+    docker_image?: string;
+    docker_runtime?: string;
+  };
+  permissionMode: string | undefined;
+  permissionFloored: { from: string; to: string } | null;
+} {
+  const perIssueOff = issue.sandbox_mode === "off";
+  const perIssueWritable = issue.sandbox_extra_writable_paths ?? [];
+
+  const wfSandbox = agentConfig?.sandbox ?? {
+    backend: "native" as const,
+    network_access: true,
+    extra_read_only_paths: [] as string[],
+    extra_writable_paths: [] as string[],
+    extra_denied_paths: [] as string[],
+    docker_image: undefined as string | undefined,
+    docker_runtime: undefined as string | undefined,
+  };
+
+  const sandboxConfig = {
+    backend: perIssueOff ? ("none" as const) : wfSandbox.backend,
+    network_access: wfSandbox.network_access,
+    extra_read_only_paths: wfSandbox.extra_read_only_paths ?? [],
+    extra_writable_paths: [
+      ...(wfSandbox.extra_writable_paths ?? []),
+      ...perIssueWritable,
+    ],
+    extra_denied_paths: wfSandbox.extra_denied_paths ?? [],
+    docker_image: wfSandbox.docker_image,
+    docker_runtime: wfSandbox.docker_runtime,
+  };
+
+  // Permission mode resolution (§4.6-default)
+  let resolvedPermissionMode: string | undefined =
+    agentConfig?.permission_mode
+    ?? (agentKind === "nano"
+      ? (agentConfig?.permission_auto ? "auto" : "default")
+      : undefined);
+
+  // Permission-mode floor when sandbox is off (§4.6a)
+  // Only applies to nano — claude-code has its own sandbox/permission system
+  // and the floor has no carrier in its invocation.
+  const PERMISSIVE_MODES = new Set(["yolo", "acceptEdits"]);
+  const sandboxOff = sandboxConfig.backend === "none";
+  let permissionFloored: { from: string; to: string } | null = null;
+
+  if (agentKind === "nano" && sandboxOff && resolvedPermissionMode && PERMISSIVE_MODES.has(resolvedPermissionMode)) {
+    const original = resolvedPermissionMode;
+    resolvedPermissionMode = agentConfig?.permission_auto ? "auto" : "default";
+    permissionFloored = { from: original, to: resolvedPermissionMode };
+  }
+
+  return { sandboxConfig, permissionMode: resolvedPermissionMode, permissionFloored };
 }
 
 /**
@@ -46,125 +116,20 @@ function normalizeBlockerString(reason?: string): string {
 
 /**
  * Three-tier completion signal:
- *   1. MCP `symphony.session_completed` — agent's stated intent (only signal that
- *      can express `handoff`, since nano-agent's sentinel has no such status).
- *   2. nano-agent stdout sentinel — binary-mode outcome (success/needs_retry/abandoned/timeout).
- *   3. Process exit code — last-resort fallback when neither signal landed.
+ *   1. nano-agent Stop hook payload — binary-mode outcome (success/needs_retry/abandoned/timeout).
+ *   2. Process timeout kill — always treated as retryable timeout.
+ *
+ * Missing Stop hook payload is treated as a hard failure (`no_result_payload`).
  */
 export function deriveCompletion(
-  completionEvent: { payload_json: string | null } | null,
-  spawnResult: SpawnResult | null
+  spawnResult: SpawnResult | null,
+  payload: AgentResultSummary | null
 ): {
   semantics: string;
-  handoffState?: string;
   summary?: string;
   blockerFingerprint?: string;
   terminationCause?: string;
 } {
-  // Tier 1: MCP session_completed event (only way to express handoff)
-  if (completionEvent?.payload_json) {
-    try {
-      const payload = JSON.parse(completionEvent.payload_json) as {
-        semantics?: string;
-        summary?: string;
-        handoff_state?: string;
-        blocker_fingerprint?: string;
-        termination_cause?: string;
-      };
-      if (payload.semantics === "success" || payload.semantics === "needs_retry"
-        || payload.semantics === "handoff" || payload.semantics === "abandoned") {
-        return {
-          semantics: payload.semantics,
-          handoffState: payload.handoff_state,
-          summary: payload.summary,
-          blockerFingerprint: payload.blocker_fingerprint,
-          terminationCause: payload.termination_cause,
-        };
-      }
-    } catch {
-      // fall through to sentinel
-    }
-  }
-
-  // Tier 2: nano-agent stdout sentinel
-  const sentinel = spawnResult?.sentinel;
-  if (sentinel) {
-    const gs = sentinel.goal_state;
-
-    // Extract fingerprint and termination_cause from sentinel if present
-    const blockerFingerprint = sentinel.blocker_fingerprint
-      || (sentinel.status !== "success" && gs?.last_reason
-          ? normalizeBlockerString(gs.last_reason)
-          : undefined);
-    const terminationCause = sentinel.termination_cause;
-
-    if (gs?.achieved_at) {
-      return {
-        semantics: "success",
-        summary: gs.last_reason,
-        blockerFingerprint: undefined,
-        terminationCause,
-      };
-    }
-    if (sentinel.status === "success") {
-      return {
-        semantics: "success",
-        summary: gs?.last_reason,
-        blockerFingerprint: undefined,
-        terminationCause,
-      };
-    }
-    if (sentinel.status === "needs_retry") {
-      return {
-        semantics: "needs_retry",
-        summary: gs?.last_reason,
-        blockerFingerprint,
-        terminationCause,
-      };
-    }
-    if (sentinel.status === "abandoned") {
-      return {
-        semantics: "abandoned",
-        summary: gs?.last_reason,
-        blockerFingerprint,
-        terminationCause,
-      };
-    }
-    if (sentinel.status === "timeout") {
-      return {
-        semantics: "needs_retry",
-        summary: gs?.last_reason,
-        blockerFingerprint: blockerFingerprint || "timeout",
-        terminationCause: terminationCause || "timeout",
-      };
-    }
-  }
-
-  // Tier 3: Process exit code fallback
-  if (spawnResult?.exitCode === NANO_EXIT.RETRY) {
-    return {
-      semantics: "needs_retry",
-      blockerFingerprint: `exit_${NANO_EXIT.RETRY}`,
-      terminationCause: "exit_only",
-    };
-  }
-  if (spawnResult?.exitCode === NANO_EXIT.ABANDONED) {
-    return {
-      semantics: "abandoned",
-      blockerFingerprint: `exit_${NANO_EXIT.ABANDONED}`,
-      terminationCause: "exit_only",
-    };
-  }
-  if (spawnResult?.exitCode === NANO_EXIT.TIMEOUT) {
-    return {
-      semantics: "needs_retry",
-      blockerFingerprint: `exit_${NANO_EXIT.TIMEOUT}`,
-      terminationCause: "exit_only",
-    };
-  }
-  if (spawnResult?.exitCode === NANO_EXIT.SUCCESS) {
-    return { semantics: "handoff" };
-  }
   if (spawnResult?.killedByTimeout) {
     return {
       semantics: "needs_retry",
@@ -173,17 +138,62 @@ export function deriveCompletion(
     };
   }
 
-  // Agent completely silent or unclassified exit
+  if (!payload) {
+    return {
+      semantics: "abandoned",
+      summary: "agent exited without delivering a result summary",
+      terminationCause: "no_result_payload",
+    };
+  }
+
+  const gs = payload.goal_state;
+  const blockerFingerprint = payload.status !== "success" && gs?.last_reason
+    ? normalizeBlockerString(gs.last_reason)
+    : undefined;
+
+  if (payload.status === "success") {
+    return {
+      semantics: "success",
+      summary: gs?.last_reason ?? payload.reason,
+      blockerFingerprint: undefined,
+      terminationCause: undefined,
+    };
+  }
+  if (payload.status === "needs_retry") {
+    return {
+      semantics: "needs_retry",
+      summary: gs?.last_reason ?? payload.reason,
+      blockerFingerprint,
+      terminationCause: undefined,
+    };
+  }
+  if (payload.status === "abandoned") {
+    return {
+      semantics: "abandoned",
+      summary: gs?.last_reason ?? payload.reason,
+      blockerFingerprint,
+      terminationCause: undefined,
+    };
+  }
+  if (payload.status === "timeout") {
+    return {
+      semantics: "needs_retry",
+      summary: gs?.last_reason ?? payload.reason,
+      blockerFingerprint: blockerFingerprint || "timeout",
+      terminationCause: "timeout",
+    };
+  }
+
   return {
     semantics: "abandoned",
-    summary: "Agent exited without explicit completion signal",
-    blockerFingerprint: "agent_terminated_silently",
-    terminationCause: "no_signal",
+    summary: "Agent result payload contains unsupported status",
+    terminationCause: "bad_result_payload",
   };
 }
 
 export async function runWorker(issueId: string, attempt: number, ctx: WorkerContext): Promise<void> {
   const { tracker, workflow, logger, mcpUrl } = ctx;
+  const spawn = ctx.spawn ?? spawnAgent;
   const startedAt = new Date().toISOString();
   const startTime = Date.now();
 
@@ -260,21 +270,42 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
   const token = issueToken(issueId, attempt);
 
-  tracker.recordEvent(issueId, "started", `Attempt ${attempt} started`, { attempt });
+  // Mark current attempt before spawning agent so frontend can subscribe to correct log
+  tracker.markCurrentAttempt(issueId, attempt);
 
   const agentConfig = workflow.workflow.agent;
   const timeoutMs = agentConfig?.timeout_ms ?? 3_600_000;
-  const binary = agentConfig?.binary ?? "nano";
-  const sandboxConfig = agentConfig?.sandbox ?? {
-    backend: "native" as const,
-    network_access: true,
-    extra_read_only_paths: [],
-    extra_writable_paths: [],
-  };
+  const agentKind: "nano" | "claude-code" =
+    issue.agent_kind ?? agentConfig?.kind ?? "nano";
+  const binary =
+    issue.agent_binary ?? agentConfig?.binary ?? (agentKind === "claude-code" ? "claude" : "nano");
+
+  tracker.recordEvent(issueId, "started", `Attempt ${attempt} started`, {
+    attempt,
+    agent_kind: agentKind,
+    agent_binary: binary,
+    agent_overridden: issue.agent_kind != null || issue.agent_binary != null,
+  });
+
+  // Per-issue overrides (sandbox_mode + sandbox_extra_writable_paths) are
+  // scoped to nano. Claude-code's per-issue UX is intentionally not in v0.7.
+  const { sandboxConfig, permissionMode: resolvedPermissionMode, permissionFloored } =
+    resolveSandboxAndPermission(agentKind, issue, agentConfig);
+
+  if (permissionFloored) {
+    tracker.recordEvent(issueId, "sandbox_permission_floor",
+      `sandbox=off forced permission_mode ${permissionFloored.from} -> ${permissionFloored.to}`,
+      { from: permissionFloored.from, to: permissionFloored.to });
+    logger.warn({ issueId, from: permissionFloored.from, to: permissionFloored.to },
+      "sandbox off: floored permission_mode");
+  }
+
+  const permissionMode = resolvedPermissionMode;
+  const permissionAuto = agentConfig?.permission_auto;
 
   let spawnResult: SpawnResult | null = null;
   try {
-    spawnResult = await spawnAgent({
+    spawnResult = await spawn({
       issueId,
       attempt,
       workspace: wsPath,
@@ -283,11 +314,25 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       mcpUrl,
       binary,
       timeoutMs,
+      agentKind,
       sandboxConfig,
+      permissionMode,
+      permissionAuto,
+      logger,
     });
   } catch (err) {
     logger.error({ err, issueId }, "Agent spawn error");
     tracker.recordEvent(issueId, "error", `Agent error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const resultPayload: AgentResultSummary | null = spawnResult?.agentResult ?? null;
+
+  const patch = spawnResult?.artifacts?.patch ?? null;
+  if (patch) {
+    tracker.recordPatch(issueId, attempt, patch);
+    tracker.recordEvent(issueId, "patch_collected", `patch length: ${patch.length}`, {
+      bytes: patch.length,
+    });
   }
 
   try {
@@ -298,53 +343,68 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
     logger.warn({ err, issueId }, "after_run hook failed");
   }
 
-  const completionEvent = tracker.getLatestEventByKind(issueId, "session_completed");
-  const { semantics, handoffState, summary, blockerFingerprint, terminationCause } = deriveCompletion(completionEvent, spawnResult);
+		  const { semantics: derivedSemantics, summary, blockerFingerprint: derivedFingerprint, terminationCause } =
+		    deriveCompletion(spawnResult, resultPayload);
 
-  // Capture for run log
-  finalSemantics = semantics;
-  finalBlockerFingerprint = blockerFingerprint ?? null;
-  finalTerminationCause = terminationCause ?? null;
+	  const blockedCommandsSample = resultPayload?.blocked_commands_sample ?? [];
 
-  // Synthesize session_completed_synthetic event if agent didn't call MCP
-  if (!completionEvent) {
-    tracker.recordEvent(issueId, "session_completed_synthetic",
-      summary ?? "(agent silent)",
-      {
-        semantics,
-        handoff_state: handoffState,
-        blocker_fingerprint: blockerFingerprint,
-        termination_cause: terminationCause,
-        source: "synthetic",
-      });
-  }
+	  let semantics = derivedSemantics;
+	  let blockerFingerprint = derivedFingerprint;
 
-  // Record goal_state_observed event if sentinel contains goal_state
-  if (spawnResult?.sentinel?.goal_state) {
-    tracker.recordEvent(issueId, "goal_state_observed",
-      spawnResult.sentinel.goal_state.last_reason ?? "(no reason)",
-      spawnResult.sentinel.goal_state);
-  }
+	  // Override semantics from session_completed MCP tool call if present.
+	  // This allows agents to express intent (e.g. "handoff") that isn't in the stdout schema.
+	  const sessionCompletedEvent = tracker.getEvents()
+	    .filter((e) => e.issue_id === issueId && e.kind === "session_completed")
+	    .pop();
+	  if (sessionCompletedEvent?.payload_json) {
+	    try {
+	      const scPayload = JSON.parse(sessionCompletedEvent.payload_json);
+	      if (scPayload.semantics) {
+	        semantics = scPayload.semantics;
+	        if (scPayload.blocker_fingerprint) {
+	          blockerFingerprint = scPayload.blocker_fingerprint;
+	        }
+	      }
+	    } catch {
+	      // ignore malformed payload
+	    }
+	  }
 
-  // Record token stats from nano-agent's authoritative counter (sentinel.tokens).
-  // The LLM cannot see its own token usage, so we record from the sentinel
-  // rather than expecting agent self-report.
-  if (spawnResult?.sentinel?.tokens) {
-    const { input, output } = spawnResult.sentinel.tokens;
-    tracker.updateTokenStats(issueId, input, output, input + output);
-    finalTokens = { input, output, total: input + output };
-  }
+	  if (terminationCause === "no_result_payload") {
+	    tracker.recordEvent(issueId, "no_result_payload", summary ?? "no result payload", { attempt });
+	  }
 
-  // Record sandbox_observed event if sentinel contains sandbox metadata
-  if (spawnResult?.sentinel?.sandbox) {
-    const sandboxInfo = spawnResult.sentinel.sandbox;
-    tracker.recordEvent(
-      issueId,
-      "sandbox_observed",
-      `${sandboxInfo.backend_detail ?? sandboxInfo.backend}`,
-      sandboxInfo
-    );
-  }
+	  // Capture for run log
+	  finalSemantics = semantics;
+	  finalBlockerFingerprint = blockerFingerprint ?? null;
+	  finalTerminationCause = terminationCause ?? null;
+
+	  // Record goal_state_observed event if payload contains goal_state
+	  if (resultPayload?.goal_state) {
+	    tracker.recordEvent(issueId, "goal_state_observed",
+	      resultPayload.goal_state.last_reason ?? "(no reason)",
+	      resultPayload.goal_state);
+	  }
+
+	  // Record token stats from agent's authoritative counter (payload.tokens).
+	  if (resultPayload?.tokens) {
+	    const { input, output } = resultPayload.tokens;
+	    if (input != null && output != null) {
+	      tracker.updateTokenStats(issueId, input, output, input + output);
+	      finalTokens = { input, output, total: input + output };
+	    }
+	  }
+
+	  // Record sandbox_observed event if payload contains sandbox metadata
+	  if (resultPayload?.sandbox) {
+	    const sandboxInfo = resultPayload.sandbox;
+	    tracker.recordEvent(
+	      issueId,
+	      "sandbox_observed",
+	      `${sandboxInfo.backend ?? "unknown"}`,
+	      sandboxInfo
+	    );
+	  }
 
   const retryConfig = workflow.workflow.retry;
   const base = retryConfig?.base_delay_ms ?? 5_000;
@@ -355,15 +415,10 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
   const transitions = workflow.workflow.state_transitions ?? {};
   let targetState: string | null = (transitions as Record<string, string | null>)[semantics] ?? null;
 
-  // Agent's explicit handoff_state overrides default workflow mapping
-  if (semantics === "handoff" && handoffState) {
-    targetState = handoffState;
-  }
-
-  // 关键顺序：先 updateIssueState（改 issues.state），再 updateLastIssueState（同步到新值）
-  // 否则 last_issue_state(旧) != issues.state(新)，会被 candidate SQL 重新拾起
-  if (targetState && targetState !== issue.state) {
-    tracker.updateIssueState(issueId, targetState);
+	  // 关键顺序：先 updateIssueState（改 issues.state），再 updateLastIssueState（同步到新值）
+	  // 否则 last_issue_state(旧) != issues.state(新)，会被 candidate SQL 重新拾起
+	  if (targetState && targetState !== issue.state) {
+	    tracker.updateIssueState(issueId, targetState);
   }
   const finalState = targetState ?? issue.state;
 
@@ -373,10 +428,16 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
     tracker.updateLastIssueState(issueId, finalState);
     finalTargetState = finalState;
     tracker.recordEvent(issueId, "completed", summary ?? "Agent completed successfully", { target_state: finalState });
-  } else if (semantics === "needs_retry" && attempt < maxRetries) {
-    // Same-cause short-circuit: if same fingerprint repeats and we've seen it before, skip retry
-    const currentFingerprint = blockerFingerprint ?? "";
-    const prevFingerprint = tracker.getLastBlockerFingerprint(issueId);
+	  } else if (semantics === "handoff") {
+	    tracker.updateLastBlockerFingerprint(issueId, null);
+	    tracker.releaseIssue(issueId, finalState);
+	    tracker.updateLastIssueState(issueId, finalState);
+	    finalTargetState = finalState;
+	    tracker.recordEvent(issueId, "handoff", summary ?? "Agent handed off", { target_state: finalState });
+	  } else if (semantics === "needs_retry" && attempt < maxRetries) {
+	    // Same-cause short-circuit: if same fingerprint repeats and we've seen it before, skip retry
+	    const currentFingerprint = blockerFingerprint ?? "";
+	    const prevFingerprint = tracker.getLastBlockerFingerprint(issueId);
 
     if (currentFingerprint && currentFingerprint === prevFingerprint && attempt >= 1) {
       // Short-circuit to blocked state
@@ -409,34 +470,17 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       finalTargetState = issue.state; // State doesn't change on retry
       tracker.recordEvent(issueId, "retry_scheduled", `Retry scheduled in ${delay}ms`, { delay, attempt: attempt + 1 });
     }
-  } else if (semantics === "handoff") {
-    tracker.updateLastBlockerFingerprint(issueId, null);
-    const finalHandoffState = handoffState ?? "in_review";
-    const wsDiff = await collectWorkspaceDiff(wsPath);
-    const completionPayload = JSON.parse(completionEvent?.payload_json ?? "{}") as Record<string, unknown>;
-
-    tracker.releaseIssue(issueId, finalHandoffState);
-    tracker.updateLastIssueState(issueId, targetState ?? finalHandoffState);
-    finalTargetState = targetState ?? finalHandoffState;
-    tracker.recordEvent(issueId, "handoff", summary ?? `Handed off to ${finalHandoffState}`, {
-      target_state: targetState ?? finalHandoffState,
-      summary: summary ?? "",
-      artifacts: completionPayload.artifacts ?? [],
-      follow_ups: completionPayload.follow_ups ?? [],
-      metrics: completionPayload.metrics ?? {},
-      workspace_diff: wsDiff,
-    });
-  } else {
-    // Abandoned or max retries exceeded
-    tracker.releaseIssue(issueId, "released");
-    tracker.updateLastIssueState(issueId, finalState);
-    finalTargetState = finalState;
-    tracker.recordEvent(issueId, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
-  }
+	  } else {
+	    // Abandoned or max retries exceeded
+	    tracker.releaseIssue(issueId, "released");
+	    tracker.updateLastIssueState(issueId, finalState);
+	    finalTargetState = finalState;
+	    tracker.recordEvent(issueId, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
+	  }
 
   revokeToken(token);
 
-  logger.info({ issueId, semantics, attempt }, "Worker completed");
+  logger.info({ issueId, semantics, attempt, agent_kind: agentKind }, "Worker completed");
   } finally {
     // Always write run log, even if worker throws
     const finishedAt = new Date().toISOString();

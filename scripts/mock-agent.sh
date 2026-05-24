@@ -109,25 +109,27 @@ rpc "tools/call" "$(printf '{"name":"symphony.session_completed","arguments":{"s
 log "finished semantics=$SEMANTICS"
 
 ############################################
-# Phase 5: Emit sentinel
+# Phase 5: Output result JSON on stdout
 ############################################
-# Real nano-agent emits a sentinel with status and optional goal_state.
-# Only success should mark goal_state as achieved.
-# For abandoned/needs_retry, we leave achieved_at null.
-# Emit sentinel to stdout (protocol requirement)
-# Use ISO-8601 timestamp for achieved_at when status=success
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2024-01-01T00:00:00Z")
-if [[ "$SEMANTICS" == "success" ]]; then
-  printf '<<<NANO_RESULT>>>{"status":"success","goal_state":{"condition":"mock goal","achieved_at":"%s","last_reason":"mock done"}}\n' "$TIMESTAMP"
-elif [[ "$SEMANTICS" == "handoff" ]]; then
-  # For handoff, don't emit sentinel - let worker derive from MCP session_completed event with handoff_state
-  :
-elif [[ "$SEMANTICS" == "needs_retry" ]]; then
-  printf '<<<NANO_RESULT>>>{"status":"needs_retry","goal_state":{"condition":"mock goal","achieved_at":null,"last_reason":"mock retry"}}\n'
-elif [[ "$SEMANTICS" == "abandoned" ]]; then
-  printf '<<<NANO_RESULT>>>{"status":"abandoned","goal_state":{"condition":"mock goal","achieved_at":null,"last_reason":"mock abandoned"}}\n'
-else
-  printf '<<<NANO_RESULT>>>{"status":"success","goal_state":{"condition":"mock goal","achieved_at":"%s","last_reason":"mock done"}}\n' "$TIMESTAMP"
+# New contract: agent writes a single JSON line to stdout.
+# The spawner captures it via adapter.parseResult(stdout).
+
+STATUS="$SEMANTICS"
+if [[ "$STATUS" != "success" && "$STATUS" != "needs_retry" && "$STATUS" != "abandoned" && "$STATUS" != "timeout" ]]; then
+  STATUS="success"
 fi
+
+if [[ "$STATUS" == "success" ]]; then
+  PAYLOAD='{"status":"success","reason":"mock done","goal_state":{"last_reason":"mock done","iterations":1}}'
+elif [[ "$STATUS" == "needs_retry" ]]; then
+  PAYLOAD='{"status":"needs_retry","reason":"mock retry"}'
+elif [[ "$STATUS" == "abandoned" ]]; then
+  PAYLOAD='{"status":"abandoned","reason":"mock abandoned"}'
+else
+  PAYLOAD='{"status":"timeout","reason":"mock timeout"}'
+fi
+
+log "delivering result via stdout"
+printf '%s\n' "$PAYLOAD"
 
 exit 0

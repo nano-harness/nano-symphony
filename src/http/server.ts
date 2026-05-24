@@ -10,11 +10,12 @@ import type { Workflow } from "../workflow/types.ts";
 export function createHttpServer(
   tracker: Tracker,
   getWorkflow: () => { workflow: Workflow; template: string } | undefined,
-  triggerTick: () => void
+  triggerTick: () => void,
+  options?: { reloadWorkflow?: () => { workflow: Workflow; template: string } | null },
 ): Hono {
   const app = new Hono();
   app.route("/mcp", createMcpRouter(tracker, getWorkflow));
-  app.route("/api/v1", createRoutes(tracker, getWorkflow, triggerTick));
+  app.route("/api/v1", createRoutes(tracker, getWorkflow, triggerTick, options));
 
   const staticRoot = process.env.SYMPHONY_STATIC_ROOT ?? "./frontend/dist";
   const indexPath = resolve(join(staticRoot, "index.html"));

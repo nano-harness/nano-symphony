@@ -1,7 +1,20 @@
-import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
+import { createSignal, createMemo, onMount, onCleanup, For, Show } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { api, type Issue } from "./api";
 import { IssueModal } from "./IssueModal";
+
+type ViewMode = "list" | "board";
+
+const VIEW_STORAGE_KEY = "symphony.dashboardView";
+
+const BOARD_COLUMNS: Array<{ state: string; label: string }> = [
+  { state: "backlog",     label: "BACKLOG" },
+  { state: "todo",        label: "TODO" },
+  { state: "in_progress", label: "IN PROGRESS" },
+  { state: "in_review",   label: "IN REVIEW" },
+  { state: "done",        label: "DONE" },
+  { state: "cancelled",   label: "CANCELLED" },
+];
 
 export function Dashboard() {
   const navigate = useNavigate();
@@ -13,6 +26,18 @@ export function Dashboard() {
   const [deletingId, setDeletingId] = createSignal<string | null>(null);
   const [toast, setToast] = createSignal<{ message: string; type: "success" | "error" } | null>(null);
 
+  const [viewMode, setViewModeRaw] = createSignal<ViewMode>(
+    (() => {
+      if (typeof localStorage === "undefined") return "list";
+      const stored = localStorage.getItem(VIEW_STORAGE_KEY);
+      return stored === "list" || stored === "board" ? stored : "list";
+    })()
+  );
+  const setViewMode = (m: ViewMode) => {
+    setViewModeRaw(m);
+    try { localStorage.setItem(VIEW_STORAGE_KEY, m); } catch {}
+  };
+
   const load = async () => {
     setIssues(await api.listIssues());
   };
@@ -20,7 +45,30 @@ export function Dashboard() {
   onMount(() => {
     load();
     const es = api.streamEvents();
-    es.addEventListener("message", () => load());
+    es.addEventListener("message", (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        const visibleIds = new Set(issues().map((i) => i.id));
+        // Reload if event affects visible issue or is a state change
+        if (visibleIds.has(event.issue_id) || event.kind === "state_changed") {
+          load();
+        }
+      } catch {
+        // ignore parse errors
+      }
+    });
+    es.addEventListener("run", (e) => {
+      try {
+        const runPatch = JSON.parse(e.data);
+        const visibleIds = new Set(issues().map((i) => i.id));
+        // Reload if run event affects visible issue
+        if (visibleIds.has(runPatch.issue_id)) {
+          load();
+        }
+      } catch {
+        // ignore parse errors
+      }
+    });
     onCleanup(() => es.close());
   });
 
@@ -96,36 +144,57 @@ export function Dashboard() {
           onInput={(e) => setFilter(e.currentTarget.value)}
         />
 
-        <div class="state-chips">
-          <For each={["ALL", "TODO", "ACTIVE", "REVIEW", "DONE", "BACKLOG"]}>
-            {(chip) => (
-              <button
-                class="state-chip"
-                classList={{
-                  active: stateFilter() === chip ||
-                    (chip === "ACTIVE" && stateFilter() === "in_progress") ||
-                    (chip === "REVIEW" && stateFilter() === "in_review") ||
-                    (chip === "TODO" && stateFilter() === "todo") ||
-                    (chip === "DONE" && stateFilter() === "done") ||
-                    (chip === "BACKLOG" && stateFilter() === "backlog")
-                }}
-                onClick={() => {
-                  const map: Record<string, string> = {
-                    ALL: "ALL",
-                    TODO: "todo",
-                    ACTIVE: "in_progress",
-                    REVIEW: "in_review",
-                    DONE: "done",
-                    BACKLOG: "backlog",
-                  };
-                  setStateFilter(map[chip]);
-                }}
-              >
-                {chip}
-              </button>
-            )}
-          </For>
+        <div class="view-toggle" role="tablist" aria-label="Dashboard view">
+          <button
+            class="view-toggle-btn"
+            classList={{ active: viewMode() === "list" }}
+            onClick={() => setViewMode("list")}
+            role="tab"
+            aria-selected={viewMode() === "list"}
+            title="List view"
+          >≡ List</button>
+          <button
+            class="view-toggle-btn"
+            classList={{ active: viewMode() === "board" }}
+            onClick={() => setViewMode("board")}
+            role="tab"
+            aria-selected={viewMode() === "board"}
+            title="Board view"
+          >▦ Board</button>
         </div>
+
+        <Show when={viewMode() === "list"}>
+          <div class="state-chips">
+            <For each={["ALL", "TODO", "ACTIVE", "REVIEW", "DONE", "BACKLOG"]}>
+              {(chip) => (
+                <button
+                  class="state-chip"
+                  classList={{
+                    active: stateFilter() === chip ||
+                      (chip === "ACTIVE" && stateFilter() === "in_progress") ||
+                      (chip === "REVIEW" && stateFilter() === "in_review") ||
+                      (chip === "TODO" && stateFilter() === "todo") ||
+                      (chip === "DONE" && stateFilter() === "done") ||
+                      (chip === "BACKLOG" && stateFilter() === "backlog")
+                  }}
+                  onClick={() => {
+                    const map: Record<string, string> = {
+                      ALL: "ALL",
+                      TODO: "todo",
+                      ACTIVE: "in_progress",
+                      REVIEW: "in_review",
+                      DONE: "done",
+                      BACKLOG: "backlog",
+                    };
+                    setStateFilter(map[chip]);
+                  }}
+                >
+                  {chip}
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
 
         <button class="btn" onClick={handleCreate}>
           + New Issue
@@ -135,64 +204,75 @@ export function Dashboard() {
         </A>
       </div>
 
-      <div class="score">
-        <Show when={filtered().length === 0}>
-          <div class="score-empty">
-            <div class="score-empty-icon">𝄞</div>
-            <div class="score-empty-text">A symphony begins with a single bar.</div>
-            <div class="score-empty-hint">Create your first issue to start composing.</div>
-          </div>
-        </Show>
+      <Show when={viewMode() === "list"}>
+        <div class="score">
+          <Show when={filtered().length === 0}>
+            <div class="score-empty">
+              <div class="score-empty-icon">𝄞</div>
+              <div class="score-empty-text">A symphony begins with a single bar.</div>
+              <div class="score-empty-hint">Create your first issue to start composing.</div>
+            </div>
+          </Show>
 
-        <Show when={filtered().length > 0}>
-          <div class="score-header">
-            <div class="score-header-cell">№</div>
-            <div class="score-header-cell">Movement</div>
-            <div class="score-header-cell">State</div>
-            <div class="score-header-cell">Priority</div>
-            <div class="score-header-cell">Actions</div>
-          </div>
-          <ul class="score-list">
-            <For each={filtered()}>
-              {(issue, index) => (
-                <li
-                  class="bar"
-                  style={{ "animation-delay": `${index() * 28}ms` }}
-                  onClick={() => navigate(`/issues/${issue.id}`)}
-                >
-                  <div class="bar-num">{index() + 1}</div>
-                  <div class="bar-title">{issue.title}</div>
-                  <div class="bar-state">
-                    <span class={`pill ${issue.state}`}>
-                      {issue.state.replace("_", " ")}
-                    </span>
-                  </div>
-                  <div class="bar-priority">
-                    <span class={`priority-dot ${issue.priority}`}></span>
-                    <span class="priority-text">{issue.priority}</span>
-                  </div>
-                  <div class="bar-actions" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      class="icon-btn"
-                      onClick={() => handleEdit(issue)}
-                      title="Edit issue"
-                    >
-                      ✎
-                    </button>
-                    <button
-                      class="icon-btn"
-                      onClick={() => confirmDelete(issue.id)}
-                      title="Delete issue"
-                    >
-                      ×
-                    </button>
-                  </div>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
-      </div>
+          <Show when={filtered().length > 0}>
+            <div class="score-header">
+              <div class="score-header-cell">№</div>
+              <div class="score-header-cell">Movement</div>
+              <div class="score-header-cell">State</div>
+              <div class="score-header-cell">Priority</div>
+              <div class="score-header-cell">Actions</div>
+            </div>
+            <ul class="score-list">
+              <For each={filtered()}>
+                {(issue, index) => (
+                  <li
+                    class="bar"
+                    style={{ "animation-delay": `${index() * 28}ms` }}
+                    onClick={() => navigate(`/issues/${issue.id}`)}
+                  >
+                    <div class="bar-num">{index() + 1}</div>
+                    <div class="bar-title">{issue.title}</div>
+                    <div class="bar-state">
+                      <span class={`pill ${issue.state}`}>
+                        {issue.state.replace("_", " ")}
+                      </span>
+                    </div>
+                    <div class="bar-priority">
+                      <span class={`priority-dot ${issue.priority}`}></span>
+                      <span class="priority-text">{issue.priority}</span>
+                    </div>
+                    <div class="bar-actions" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        class="icon-btn"
+                        onClick={() => handleEdit(issue)}
+                        title="Edit issue"
+                      >
+                        ✎
+                      </button>
+                      <button
+                        class="icon-btn"
+                        onClick={() => confirmDelete(issue.id)}
+                        title="Delete issue"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={viewMode() === "board"}>
+        <BoardView
+          issues={filtered()}
+          onCardClick={(id) => navigate(`/issues/${id}`)}
+          onEdit={handleEdit}
+          onDelete={confirmDelete}
+        />
+      </Show>
 
       {/* Issue Modal */}
       <Show when={showModal()}>
@@ -230,6 +310,62 @@ export function Dashboard() {
           <div class={`toast ${toast()!.type}`}>{toast()!.message}</div>
         </div>
       </Show>
+    </div>
+  );
+}
+
+function BoardView(props: {
+  issues: Issue[];
+  onCardClick: (id: string) => void;
+  onEdit: (issue: Issue) => void;
+  onDelete: (id: string) => void;
+}) {
+  const byState = createMemo(() => {
+    const buckets: Record<string, Issue[]> = {};
+    for (const col of BOARD_COLUMNS) buckets[col.state] = [];
+    for (const i of props.issues) {
+      if (buckets[i.state]) buckets[i.state].push(i);
+    }
+    return buckets;
+  });
+
+  return (
+    <div class="board">
+      <For each={BOARD_COLUMNS}>
+        {(col) => (
+          <div class="board-col" data-state={col.state}>
+            <div class="board-col-header">
+              <span class="board-col-label">{col.label}</span>
+              <span class="board-col-count">{byState()[col.state].length}</span>
+            </div>
+            <div class="board-col-body">
+              <Show
+                when={byState()[col.state].length > 0}
+                fallback={<div class="board-col-empty">— rest —</div>}
+              >
+                <For each={byState()[col.state]}>
+                  {(issue) => (
+                    <div
+                      class="board-card"
+                      onClick={() => props.onCardClick(issue.id)}
+                    >
+                      <div class="board-card-title">{issue.title}</div>
+                      <div class="board-card-meta">
+                        <span class={`priority-dot ${issue.priority}`}></span>
+                        <span class="priority-text">{issue.priority}</span>
+                      </div>
+                      <div class="board-card-actions" onClick={(e) => e.stopPropagation()}>
+                        <button class="icon-btn" onClick={() => props.onEdit(issue)} title="Edit">✎</button>
+                        <button class="icon-btn" onClick={() => props.onDelete(issue.id)} title="Delete">×</button>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </div>
+        )}
+      </For>
     </div>
   );
 }

@@ -100,7 +100,7 @@ Network access, env-var stripping (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_*
 
 **Note on external workspaces:** When `SYMPHONY_WORKSPACE_MANAGED=0`, the workspace is user-provided (e.g., vwsd mountpoint, git worktree). Symphony will not delete this workspace after the run completes. All blocklist restrictions still apply.
 
-If a path you legitimately need is denied, **report a blocker via `symphony.report_event`** (and prefer calling `symphony.session_completed` with `semantics=abandoned` + a `blocker_fingerprint` once you've decided to stop). Do not retry the same denied path in a loop — it's a deterministic restriction, not a transient error.
+If a path you legitimately need is denied, **report a blocker via `symphony.report_event`**. Do not retry the same denied path in a loop — it's a deterministic restriction, not a transient error.
 
 ## Required workflow
 
@@ -108,15 +108,11 @@ If a path you legitimately need is denied, **report a blocker via `symphony.repo
 2. Inspect the repository and identify the smallest safe change that satisfies the issue.
 3. Report progress when you complete a meaningful unit of work, hit a blocker, or finish validation.
 4. Validate changes using the repository's existing test, lint, or build commands when applicable.
-5. Call `symphony.session_completed` before exiting, even if the task cannot be completed.
-   For failures, set `semantics` to `needs_retry` (transient) or `abandoned` (cannot proceed),
-   and include `blocker_fingerprint` (a short stable string like
-   `sandbox_denied:~/.aws/credentials` or `evaluator_invalid_json:goal_eval`)
-   so the orchestrator can short-circuit same-cause retries.
 
-### Sentinel fallback
+### Stop hook delivery
 
-If the agent process is force-terminated by a turn-policy guard (`error_threshold`, `diminishing_returns`, `similar_content_loop`, `context_done`, `goal_max_turns`) the LLM does not get a final turn and cannot call `symphony.session_completed`. In that case nano-agent writes `termination_cause` and `blocker_fingerprint` into the `<<<NANO_RESULT>>>` stdout sentinel; symphony reads them automatically. You don't need to do anything special — but knowing this exists may help you decide between *trying to reach success-with-explanation* (calling MCP yourself) vs. *letting the guard fire*.
+nano-symphony receives binary session results via the nano-agent Stop hook payload (posted to symphony’s `/agent-result` endpoint). stdout/stderr scanning for sentinels is not used.
+If the process is force-terminated and cannot deliver the Stop hook payload, symphony classifies the run as `no_result_payload`.
 
 ## Reporting guidance
 

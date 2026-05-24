@@ -6,6 +6,7 @@ import { createTracker } from "./db/tracker.ts";
 import { loadWorkflow, watchWorkflow } from "./workflow/loader.ts";
 import { createHttpServer } from "./http/server.ts";
 import { createOrchestrator } from "./orchestrator/index.ts";
+import { bus } from "./db/event_bus.ts";
 import type { Workflow } from "./workflow/types.ts";
 
 const logger = pino({ level: config.LOG_LEVEL });
@@ -16,10 +17,24 @@ async function main() {
   const tracker = createTracker(db);
   let currentWorkflow: { workflow: Workflow; template: string } | undefined;
   try { currentWorkflow = loadWorkflow(config.WORKFLOW_PATH); } catch (err) { logger.warn({ err }, "Could not load workflow"); }
-  watchWorkflow(config.WORKFLOW_PATH, (workflow, template) => { currentWorkflow = { workflow, template }; }, logger);
+  watchWorkflow(config.WORKFLOW_PATH, (workflow, template) => {
+    currentWorkflow = { workflow, template };
+    bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_id: null, message: "workflow reloaded via watcher", payload_json: null });
+  }, logger);
   const getWorkflow = () => currentWorkflow;
+  const reloadWorkflow = (): { workflow: Workflow; template: string } | null => {
+    try {
+      const loaded = loadWorkflow(config.WORKFLOW_PATH);
+      currentWorkflow = loaded;
+      logger.info("workflow reloaded via API");
+      return loaded;
+    } catch (err) {
+      logger.error({ err }, "workflow reload failed via API");
+      return null;
+    }
+  };
   const orchestrator = createOrchestrator(tracker, getWorkflow, logger);
-  const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick());
+  const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick(), { reloadWorkflow });
   const server = Bun.serve({
     port: config.PORT,
     fetch: app.fetch,

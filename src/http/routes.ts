@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import fs from "fs/promises";
+import { watch } from "fs";
 import path from "path";
 import { nanoid } from "nanoid";
 import type { Tracker } from "../db/tracker.ts";
@@ -8,9 +9,13 @@ import type { Workflow } from "../workflow/types.ts";
 import { config } from "../config.ts";
 import { z } from "zod";
 import { nullishString } from "./schemas.ts";
+import { bus } from "../db/event_bus.ts";
+import type { SymphonyEvent, SymphonyRun } from "../db/tracker.ts";
+import type { RunPatch } from "../db/event_bus.ts";
 
 const IDENT_RE = /^[A-Z][A-Z0-9]*-\d+$/;
 const VALID_STATES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"] as const;
+const AgentKindEnum = z.enum(["nano", "claude-code"]).nullable().optional();
 
 const IssueCreateSchema = z.object({
   id: nullishString(),
@@ -22,6 +27,10 @@ const IssueCreateSchema = z.object({
   branch: nullishString(),
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
+  agent_kind: AgentKindEnum,
+  agent_binary: nullishString({ max: 256 }),
+  sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
+  sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
   labels: z.array(z.string()).default([]),
 });
 
@@ -33,13 +42,18 @@ const IssueUpdateSchema = z.object({
   branch: nullishString(),
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
+  agent_kind: AgentKindEnum,
+  agent_binary: nullishString({ max: 256 }),
+  sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
+  sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
   labels: z.array(z.string()).optional(),
 }).strict(); // Reject unexpected fields like identifier or id
 
 export function createRoutes(
   tracker: Tracker,
   _getWorkflow: () => { workflow: Workflow; template: string } | undefined,
-  triggerTick: () => void
+  triggerTick: () => void,
+  options?: { reloadWorkflow?: () => { workflow: Workflow; template: string } | null },
 ): Hono {
   const app = new Hono();
 
@@ -103,21 +117,64 @@ export function createRoutes(
 
   app.get("/events/stream", (c) => {
     return streamSSE(c, async (stream) => {
-      let lastTs = Date.now();
-      let lastWriteTs = Date.now();
-      while (true) {
-        const events = tracker.getEvents(lastTs);
+      // Support Last-Event-ID for reconnection catch-up
+      const lastEventId = c.req.header("Last-Event-ID");
+      const querySince = c.req.query("since");
+      const since = lastEventId ? Number(lastEventId) : (querySince ? Number(querySince) : undefined);
+
+      // Catch up with historical events if since is provided
+      if (since !== undefined) {
+        const events = tracker.getEvents(since);
         for (const ev of events) {
-          await stream.writeSSE({ data: JSON.stringify(ev), id: ev.id });
-          lastTs = Math.max(lastTs, ev.ts);
-          lastWriteTs = Date.now();
+          await stream.writeSSE({ data: JSON.stringify(ev), id: String(ev.ts), event: "message" });
         }
-        if (Date.now() - lastWriteTs > 15_000) {
-          await stream.writeSSE({ data: "", event: "ping" });
-          lastWriteTs = Date.now();
-        }
-        await stream.sleep(2000);
       }
+
+      let lastWriteTs = Date.now();
+
+      // Listen to bus events
+      const onEvent = async (event: SymphonyEvent) => {
+        try {
+          await stream.writeSSE({ data: JSON.stringify(event), id: String(event.ts), event: "message" });
+          lastWriteTs = Date.now();
+        } catch (e) {
+          // Stream closed, cleanup will happen in abort handler
+        }
+      };
+
+      const onRun = async (patch: RunPatch) => {
+        try {
+          await stream.writeSSE({ data: JSON.stringify(patch), event: "run" });
+          lastWriteTs = Date.now();
+        } catch (e) {
+          // Stream closed
+        }
+      };
+
+      bus.on("event", onEvent);
+      bus.on("run", onRun);
+
+      // Heartbeat interval
+      const heartbeatInterval = setInterval(async () => {
+        if (Date.now() - lastWriteTs > 10_000) {
+          try {
+            await stream.writeSSE({ data: "", event: "ping" });
+            lastWriteTs = Date.now();
+          } catch (e) {
+            // Stream closed
+          }
+        }
+      }, 10_000);
+
+      // Cleanup on abort
+      c.req.raw.signal.addEventListener("abort", () => {
+        bus.off("event", onEvent);
+        bus.off("run", onRun);
+        clearInterval(heartbeatInterval);
+      });
+
+      // Keep stream alive indefinitely
+      await new Promise(() => {});
     });
   });
 
@@ -132,46 +189,122 @@ export function createRoutes(
   app.put("/workflow", async (c) => {
     const { content } = await c.req.json() as { content: string };
     await fs.writeFile(config.WORKFLOW_PATH, content, "utf-8");
+    // Sync reload after write — watcher is only a fallback.
+    if (options?.reloadWorkflow) {
+      const result = options.reloadWorkflow();
+      if (result) {
+        bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_id: null, message: "workflow reloaded via PUT /workflow", payload_json: null });
+      } else {
+        bus.emit("event", { kind: "workflow_reload_failed", ts: Date.now(), issue_id: null, message: "workflow reload failed after PUT /workflow", payload_json: null });
+      }
+    }
     return c.json({ ok: true });
   });
 
   app.get("/logs/:issueId/:attempt", (c) => {
-    const { issueId, attempt } = c.req.param();
+    const { issueId, attempt: attemptParam } = c.req.param();
     return streamSSE(c, async (stream) => {
       const issue = tracker.getIssue(issueId);
-      if (!issue) { await stream.writeSSE({ data: "Issue not found", event: "error" }); return; }
-      const run = tracker.getActiveRuns().find((r) => r.issue_id === issueId);
+      if (!issue) {
+        await stream.writeSSE({ data: "Issue not found", event: "error" });
+        return;
+      }
+
+      const run = tracker.getRun(issueId);
       const wsPath = run?.workspace_path;
       if (!wsPath) {
         await stream.writeSSE({ data: "No workspace found", event: "error" });
-        return; // Exit SSE callback to close connection
+        return;
       }
+
+      // Support "current" as attempt parameter
+      let attempt = attemptParam;
+      if (attempt === "current" && run?.current_attempt !== null && run?.current_attempt !== undefined) {
+        attempt = String(run.current_attempt);
+      }
+
       const logPath = path.join(wsPath, "logs", `attempt-${attempt}.log`);
       let offset = 0;
       let lastWriteTs = Date.now();
-      const startTime = Date.now();
-      const MAX_WAIT_MS = 30_000; // 30s timeout waiting for log file
-      while (true) {
+      let watcher: ReturnType<typeof watch> | null = null;
+
+      const TERMINAL_STATES = new Set(["released", "cancelled", "done", "abandoned"]);
+
+      // Helper to check if run is in terminal state
+      const isTerminal = () => {
+        const currentRun = tracker.getRun(issueId);
+        return currentRun && TERMINAL_STATES.has(currentRun.last_state);
+      };
+
+      // Helper to read and send incremental log content
+      const readAndSend = async () => {
         try {
           const content = await fs.readFile(logPath, "utf-8");
           if (content.length > offset) {
             await stream.writeSSE({ data: content.slice(offset), event: "log" });
             offset = content.length;
             lastWriteTs = Date.now();
+            return true;
           }
         } catch {
-          // file not ready - check timeout
-          if (Date.now() - startTime > MAX_WAIT_MS && offset === 0) {
-            await stream.writeSSE({ data: "Log file not found after 30s", event: "error" });
-            return;
+          // File not ready yet
+        }
+        return false;
+      };
+
+      // Setup fs.watch on the logs directory
+      try {
+        const logsDir = path.dirname(logPath);
+        watcher = watch(logsDir, async (eventType, filename) => {
+          if (filename === path.basename(logPath)) {
+            await readAndSend();
+          }
+        });
+      } catch {
+        // fs.watch not available, will use polling
+      }
+
+      // Polling loop
+      const pollInterval = setInterval(async () => {
+        await readAndSend();
+
+        // Send heartbeat if no activity
+        if (Date.now() - lastWriteTs > 5_000) {
+          try {
+            await stream.writeSSE({ data: "", event: "ping" });
+            lastWriteTs = Date.now();
+          } catch (e) {
+            // Stream closed
           }
         }
-        if (Date.now() - lastWriteTs > 15_000) {
-          await stream.writeSSE({ data: "", event: "ping" });
-          lastWriteTs = Date.now();
+
+        // Check for terminal state
+        if (isTerminal()) {
+          // Wait 1 second for final writes, then send end event
+          setTimeout(async () => {
+            const hadNewContent = await readAndSend();
+            try {
+              await stream.writeSSE({ data: "", event: "end" });
+            } catch {
+              // Stream already closed
+            }
+            clearInterval(pollInterval);
+            if (watcher) watcher.close();
+          }, 1000);
         }
-        await stream.sleep(1000);
-      }
+      }, 200);
+
+      // Cleanup on abort
+      c.req.raw.signal.addEventListener("abort", () => {
+        clearInterval(pollInterval);
+        if (watcher) watcher.close();
+      });
+
+      // Initial read
+      await readAndSend();
+
+      // Keep stream alive until terminal state or client disconnect
+      await new Promise(() => {});
     });
   });
 

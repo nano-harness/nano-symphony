@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -7,6 +7,13 @@ import { watchWorkflow } from "../../src/workflow/loader.ts";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("watchWorkflow", () => {
+  const PRIOR_POLL = process.env.SYMPHONY_WATCH_USE_POLLING;
+  beforeAll(() => { process.env.SYMPHONY_WATCH_USE_POLLING = "1"; });
+  afterAll(() => {
+    if (PRIOR_POLL == null) delete process.env.SYMPHONY_WATCH_USE_POLLING;
+    else process.env.SYMPHONY_WATCH_USE_POLLING = PRIOR_POLL;
+  });
+
   test("reloads on file change", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-watch-"));
     const file = path.join(dir, "WORKFLOW.md");
@@ -17,7 +24,7 @@ describe("watchWorkflow", () => {
 
     await sleep(300);                       // let watcher attach
     await fs.writeFile(file, "---\ntracker:\n  type: local\n---\nv2");
-    await sleep(700);                       // awaitWriteFinish stability + reload
+    await sleep(1500);                      // awaitWriteFinish stability + polling + reload
 
     await watcher.close();
     await fs.rm(dir, { recursive: true, force: true });
@@ -38,8 +45,9 @@ describe("watchWorkflow", () => {
 
     await sleep(300);
     // Write something that will fail WorkflowSchema validation
-    await fs.writeFile(file, "no frontmatter at all");
-    await sleep(700);
+    // (all top-level fields are optional, so we need an invalid nested value)
+    await fs.writeFile(file, "---\npolling:\n  interval_ms: not_a_number\n---\nbad");
+    await sleep(1500);
 
     await watcher.close();
     await fs.rm(dir, { recursive: true, force: true });

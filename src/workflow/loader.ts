@@ -18,10 +18,16 @@ export function watchWorkflow(
 ) {
   // awaitWriteFinish gives chokidar a stability window to avoid firing on
   // partial writes (`cat > file` truncate-rewrite, atomic-rename editors).
+  // macOS fsevents misses atomic-rename writes from editors, so default to
+  // polling on darwin unless explicitly overridden via env.
+  const usePolling = process.env.SYMPHONY_WATCH_USE_POLLING !== undefined
+    ? process.env.SYMPHONY_WATCH_USE_POLLING === "1"
+    : process.platform === "darwin";
   const watcher = chokidar.watch(filePath, {
     persistent: false,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 50, pollInterval: 200 },
+    ...(usePolling ? { usePolling: true, interval: 200 } : {}),
   });
   const reload = (event: string) => {
     try {

@@ -1,6 +1,6 @@
 ---
 name: nano-symphony-local-loop
-description: Use when you need to spin up nano-symphony locally and run a minimal end-to-end loop with the real nano agent — triggers include "本地跑通 nano-symphony", "启动 symphony 服务", "最小 demo", "orchestrator 没拉起 agent", "看不到 events", "sandbox-exec 拒绝", "sentinel 缺失", "claim 不到 issue", "symphony.session_completed", "local loop", "quick start", "起服务", "sandbox 问题", "MCP 回调".
+description: Use when you need to spin up nano-symphony locally and run a minimal end-to-end loop with the real nano agent — triggers include "本地跑通 nano-symphony", "启动 symphony 服务", "最小 demo", "orchestrator 没拉起 agent", "看不到 events", "sandbox-exec 拒绝", "result payload 缺失", "claim 不到 issue", "local loop", "quick start", "起服务", "sandbox 问题", "MCP 回调".
 ---
 
 # nano-symphony Local Loop Quick Start
@@ -10,7 +10,7 @@ description: Use when you need to spin up nano-symphony locally and run a minima
 nano-symphony is a lightweight orchestration service that combines a local Bun/TypeScript backend with SQLite, an MCP server, and real nano-agent subprocesses running in sandboxes (sandbox-exec on macOS, bwrap on Linux). The core loop is:
 
 ```
-tick → claim issue → spawn agent → collect sentinel/MCP → update state machine
+tick → claim issue → spawn agent → receive Stop hook payload → update state machine
 ```
 
 This skill provides the shortest path from zero to seeing a complete agent run finish successfully, plus a troubleshooting guide for common blockers.
@@ -96,8 +96,7 @@ Expected event sequence:
 1. `started` — Orchestrator claimed the issue
 2. `goal_state_observed` — Agent reported goal state (if using goal evaluator)
 3. `sandbox_observed` — Sandbox metadata recorded
-4. `session_completed` — Agent called `symphony.session_completed` MCP tool (if instrumented)
-5. `completed` / `handoff` / `abandoned` — Final state based on agent outcome
+4. `completed` / `abandoned` — Final state based on agent outcome
 
 Alternatively, stream events in real-time via SSE:
 
@@ -114,10 +113,10 @@ ls workspaces/DEMO-1/logs/
 tail -50 workspaces/DEMO-1/logs/attempt-0.log
 ```
 
-Look for the sentinel line at the end:
+Look for Stop hook delivery:
 
-```
-<< SENTINEL: {"status":"success","goal_state":{"condition":"...","achieved_at":"2026-05-17T07:50:00.000Z"}}
+``` 
+tail -50 workspaces/DEMO-1/logs/result-hook.log
 ```
 
 ### 7. Verify Final State
@@ -142,9 +141,8 @@ graph LR
     H --> I[spawnAgent: nano binary exec --sandbox=on]
     I --> J[Agent runs in sandbox]
     J --> K{Completion signals}
-    K -->|1. MCP session_completed| L[deriveCompletion]
-    K -->|2. stdout sentinel| L
-    K -->|3. exit code| L
+    K -->|1. Stop hook payload (/agent-result)| L[deriveCompletion]
+    K -->|2. killed_by_timeout| L
     L --> M[State machine update]
     M --> N[releaseIssue]
 ```
@@ -223,8 +221,8 @@ kill $SYM_PID
 ```
 
 **Pass criteria:**
-1. Events include `started` → `goal_state_observed` or `sandbox_observed` → `session_completed` or `completed`
-2. `attempt-0.log` contains nano output and ends with `<< SENTINEL:` line (or records exit code)
+1. Events include `started` → `goal_state_observed` or `sandbox_observed` → `completed` (or `abandoned`)
+2. `workspaces/DEMO-1/logs/result-hook.log` shows a successful POST to `/agent-result`
 3. Issue state transitioned from `todo` to `done`/`in_review`/`cancelled` (not stuck in `todo`)
 
 ## Verification & Observation
@@ -267,7 +265,7 @@ tail -100 /path/to/external/workspace/logs/attempt-0.log
 |---------|-----------|------|
 | Issue created but never gets `started` event | `state=backlog` is filtered by candidate SQL | Create with `state: "todo"` or `state: "in_progress"` |
 | `started` event, then immediate `abandoned`, exit code not 0/10/20/30 | Binary not found or sandbox denial | Check `attempt-N.log` for error; verify `nano` is on PATH or set `NANO_BIN` |
-| No `session_completed`, only `goal_state_observed` | Agent didn't call MCP tool, fell back to sentinel | Normal if agent uses sentinel; check `deriveCompletion` tier-2 logic |
+| No `completed`, only `started`/`sandbox_observed` | Stop hook payload not delivered | Check `workspaces/<id>/logs/result-hook.log` and the `no_result_payload` event |
 | Stuck in `retry_queued`, never re-runs | `next_due_ts` not reached yet, or exceeded `max_retries` | Query `symphony_runs` table: `SELECT * FROM symphony_runs WHERE issue_id='...'` |
 | sandbox-exec error: "Operation not permitted" writing path | Default sandbox only allows writes to workspace + `/tmp` | Add path to `agent.sandbox.extra_writable_paths` in WORKFLOW.md |
 | MCP callback returns 401/403 | `SYMPHONY_TOKEN` not passed or expired | Check `.nano.yaml` has `headers.X-Symphony-Token: "${env:SYMPHONY_TOKEN}"` and `MCP_TOKEN_TTL_MS` |
@@ -302,9 +300,9 @@ tail -100 /path/to/external/workspace/logs/attempt-0.log
    ❌ Agent logs are written to disk; `GET /events` is a snapshot.
    ✅ Use `GET /events/stream` (SSE) or `GET /logs/:issueId/:attempt` (SSE) for streaming.
 
-7. **Not checking sentinel format when debugging completion logic**
-   ❌ Sentinel must be valid JSON prefixed with `<< SENTINEL:`.
-   ✅ Use `grep '<< SENTINEL:' attempt-0.log` to verify format.
+7. **Not checking Stop hook delivery when debugging completion logic**
+   ❌ If the Stop hook payload is missing, the run is classified as `no_result_payload`.
+   ✅ Check `workspaces/<id>/logs/result-hook.log` and `POST /agent-result` responses.
 
 8. **Forgetting to restart service after editing WORKFLOW.md**
    ❌ In-memory workflow cache doesn't reload automatically.

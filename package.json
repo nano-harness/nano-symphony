@@ -7,7 +7,9 @@
     "dev": "bun --watch src/index.ts",
     "build": "cd frontend && npm run build",
     "lint": "tsc --noEmit",
-    "test": "bun test tests/ && cd frontend && npm run test"
+    "test:unit": "bun test tests/unit tests/*.test.ts",
+    "test:e2e": "bun test tests/e2e --concurrency 1",
+    "test": "bun test tests/unit tests/*.test.ts && bun test tests/e2e --concurrency 1 && cd frontend && npm run test"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

@@ -117,11 +117,16 @@ For all versioned releases, see the [GitHub Releases](https://github.com/nano-ha
    cd frontend && bun install
    ```
 
-2. Create a workflow file:
+2. Initialize the workflow file (idempotent — only writes if missing):
 
    ```bash
-   cp templates/WORKFLOW.example.md WORKFLOW.md
+   ./scripts/init-project.sh
    ```
+
+   该脚本会在仓库根没有 `WORKFLOW.md` 时，从 `templates/WORKFLOW.example.md` 复制一份。
+   要自定义 prompt / sandbox / permission 等行为，直接编辑根目录的 `WORKFLOW.md`。
+   关于这些字段如何被解析与渲染，参见
+   [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
 
 3. Start the backend service:
 
@@ -397,6 +402,17 @@ These tests verify:
 - Sandbox prevents writing outside workspace
 
 **Note:** These tests require a real nano-agent binary with sandbox support.
+
+## Troubleshooting
+
+### 改了 WORKFLOW.md 没生效
+
+1. 检查日志是否出现 `workflow reloaded` 或 `workflow reload failed`。
+2. macOS 上 v0.8+ 默认启用 polling，但若仍不生效可设置 `SYMPHONY_WATCH_USE_POLLING=1`。
+3. 通过 `PUT /api/v1/workflow` 接口写入后会同步触发重载，不依赖 watcher。
+4. 若出现 `workflow reload failed`，检查 YAML front matter 语法。
+
+详细机制参见 [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
 
 ## License
 

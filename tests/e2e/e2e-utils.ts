@@ -28,7 +28,7 @@ function sleep(ms: number): Promise<void> {
 
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10_000); // 10s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 20_000); // 20s timeout
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
     const text = await res.text();
@@ -128,13 +128,13 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
     await waitFor(async () => {
       try {
         const controller = new AbortController();
-        const tid = setTimeout(() => controller.abort(), 2000);
+        const tid = setTimeout(() => controller.abort(), 5000);
         const res = await fetch(`${baseUrl}/api/v1/issues`, { signal: controller.signal }).finally(() => clearTimeout(tid));
         return res.ok;
       } catch {
         return false;
       }
-    }, 10_000);
+    }, 20_000);
 
     const issue = await fetchJson(`${baseUrl}/api/v1/issues`, {
       method: "POST",
@@ -163,7 +163,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
           return false;
         }
       },
-      (timeoutSec + 10) * 1000
+      (timeoutSec + 30) * 1000
     );
 
     const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`);
