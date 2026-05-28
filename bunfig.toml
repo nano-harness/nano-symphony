@@ -3,8 +3,3 @@
 # Bun resolves paths relative to each package, so we use wildcards
 exclude = ["**/frontend/**/*", "frontend/**"]
 timeout = 60000
-
-[install]
-# Force browser-specific builds for SolidJS in test environment
-[install.scopes."solid-js"]
-conditions = ["browser", "development"]

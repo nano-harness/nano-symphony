@@ -21,6 +21,7 @@ export interface SpawnOptions {
   timeoutMs: number;
   agentKind?: AgentKind;
   logger?: { warn: (obj: unknown, msg: string) => void };
+  onStreamEvent?: (event: { kind: string; message: string; payload?: Record<string, unknown> }) => void;
   sandboxConfig?: {
     backend: "native" | "docker" | "none";
     network_access: boolean;
@@ -60,8 +61,35 @@ export const NANO_EXIT = {
   UNCLASSIFIED: 1,
 } as const;
 
+// Map of issueId → active subprocess for cancel support
+const activeProcesses = new Map<string, { proc: ReturnType<typeof Bun.spawn>; kill: () => void }>();
+const SIGKILL_ESCALATION_MS = 3000;
+
+/**
+ * Cancel a running agent by issueId. Sends SIGTERM, then SIGKILL after timeout.
+ * Returns true if a process was found and killed, false otherwise.
+ */
+export function cancelAgent(issueId: string): boolean {
+  const entry = activeProcesses.get(issueId);
+  if (!entry) return false;
+  entry.kill();
+  return true;
+}
+
+/** Returns the number of currently active agent processes. */
+export function getActiveProcessCount(): number {
+  return activeProcesses.size;
+}
+
+/** Force-kill all active agent processes. Used during shutdown. */
+export function killAllAgents(): void {
+  for (const [, entry] of activeProcesses) {
+    entry.kill();
+  }
+}
+
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig, permissionMode, permissionAuto, logger } = opts;
+  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig, permissionMode, permissionAuto, logger, onStreamEvent } = opts;
   const agentKind: AgentKind = opts.agentKind ?? "nano";
   const adapter = getAdapter(agentKind);
 
@@ -83,6 +111,14 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     permissionAuto,
     logger,
   };
+
+  // Clean up conflicting config paths left by previous agent runs.
+  // The nano adapter writes to .nano/nano.yaml (subdirectory), but agents may have
+  // created .nano.yaml at root level with stale/invalid content from prior attempts.
+  const conflictPaths = [".nano.yaml", ".nano.yaml.bak", ".nano/state"];
+  for (const cp of conflictPaths) {
+    await fs.rm(path.join(workspace, cp), { recursive: true, force: true });
+  }
 
   // Write workspace files produced by the adapter
   const files = adapter.renderWorkspaceFiles(ctx);
@@ -115,6 +151,22 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     stdout: "pipe",
     stderr: "pipe",
   });
+
+  // Register process for cancel support — kill the entire process tree
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
+  const KILL_SIGNALS = new Set(["SIGTERM", "SIGKILL"]);
+  const killProcessTree = (pid: number, signal: string) => {
+    if (!KILL_SIGNALS.has(signal)) return;
+    try { Bun.spawnSync(["pkill", `-${signal}`, "-P", String(pid)]); } catch { /* best-effort */ }
+    try { process.kill(pid, signal as NodeJS.Signals); } catch { /* already dead */ }
+  };
+  const killFn = () => {
+    const pid = proc.pid;
+    killProcessTree(pid, "SIGTERM");
+    killTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), SIGKILL_ESCALATION_MS);
+  };
+  activeProcesses.set(issueId, { proc, kill: killFn });
+
   proc.stdin.write(prompt);
   proc.stdin.end();
 
@@ -127,6 +179,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   // Capture stdout fully for result parsing
   const stdoutChunks: Uint8Array[] = [];
+  const lineDecoder = new TextDecoder();
+  let lineBuf = "";
 
   const stdoutPromise = (async () => {
     const reader = proc.stdout.getReader();
@@ -136,6 +190,22 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         if (done) break;
         stdoutChunks.push(value);
         logStream.write(value);
+
+        // Parse streaming lines for real-time events
+        if (onStreamEvent && adapter.parseStreamingLine) {
+          lineBuf += lineDecoder.decode(value, { stream: true });
+          const lines = lineBuf.split("\n");
+          lineBuf = lines.pop() ?? "";
+          for (const line of lines) {
+            const ev = adapter.parseStreamingLine(line);
+            if (ev) onStreamEvent(ev);
+          }
+        }
+      }
+      // Process any remaining partial line
+      if (onStreamEvent && adapter.parseStreamingLine && lineBuf.trim()) {
+        const ev = adapter.parseStreamingLine(lineBuf);
+        if (ev) onStreamEvent(ev);
       }
     } finally {
       reader.releaseLock();
@@ -163,6 +233,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   const exitCode = await proc.exited;
   clearTimeout(timeoutHandle);
+  if (killTimer) clearTimeout(killTimer);
+  activeProcesses.delete(issueId);
 
   // Wait for all output to be collected
   await Promise.all([stdoutPromise, stderrPromise]);

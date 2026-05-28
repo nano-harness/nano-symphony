@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AgentResultSummarySchema, AgentArtifactsSchema } from "../../src/spawner/agent-result-payload.ts";
+import { AgentResultSummarySchema, AgentArtifactsSchema, parseLastJsonLine } from "../../src/spawner/agent-result-payload.ts";
 
 // Do not change .passthrough() back to .strict() in agent-result-payload.ts.
 // Agents emit diagnostic fields that are not declared in the schema.
@@ -121,6 +121,53 @@ describe("AgentArtifactsSchema", () => {
   test("rejects patch as non-string", () => {
     const parsed = AgentArtifactsSchema.safeParse({ patch: 123 });
     expect(parsed.success).toBe(false);
+  });
+});
+
+describe("parseLastJsonLine", () => {
+  test("parses single-line JSON", () => {
+    const result = parseLastJsonLine('{"status":"success"}', AgentResultSummarySchema);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("success");
+  });
+
+  test("parses last JSON line in multi-line output", () => {
+    const text = 'some log output\nmore output\n{"status":"success","reason":"done"}';
+    const result = parseLastJsonLine(text, AgentResultSummarySchema);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("success");
+  });
+
+  test("skips trailing blank lines", () => {
+    const text = '{"status":"success","reason":"done"}\n\n\n';
+    const result = parseLastJsonLine(text, AgentResultSummarySchema);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("success");
+  });
+
+  test("skips [err] prefixed lines", () => {
+    const text = '{"status":"success","reason":"done"}\n[err] some error\n';
+    const result = parseLastJsonLine(text, AgentResultSummarySchema);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("success");
+  });
+
+  test("finds valid JSON line before invalid trailing lines", () => {
+    const text = 'start\n{"status":"needs_retry","reason":"fail"}\nnot json\n\n';
+    const result = parseLastJsonLine(text, AgentResultSummarySchema);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe("needs_retry");
+  });
+
+  test("returns null for empty input", () => {
+    expect(parseLastJsonLine("", AgentResultSummarySchema)).toBeNull();
+    expect(parseLastJsonLine("   ", AgentResultSummarySchema)).toBeNull();
+  });
+
+  test("returns null when no valid JSON matches schema", () => {
+    const text = 'some text\n{"invalid":"data"}\nmore text';
+    const result = parseLastJsonLine(text, AgentResultSummarySchema);
+    expect(result).toBeNull();
   });
 });
 

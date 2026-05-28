@@ -1,7 +1,9 @@
 const BASE = "/api/v1";
-export interface Issue { id: string; identifier: string; title: string; description: string | null; priority: string; state: string; branch: string | null; url: string | null; workspace_path: string | null; agent_kind: "nano" | "claude-code" | null; agent_binary: string | null; sandbox_mode: "default" | "off" | null; sandbox_extra_writable_paths: string[]; created_at: string; updated_at: string; labels: string[]; blockers: Array<{ blocker_id: string; blocker_state: string }>; }
+export interface Issue { id: string; identifier: string; title: string; description: string | null; priority: string; state: string; branch: string | null; url: string | null; workspace_path: string | null; agent_kind: "nano" | "claude-code" | null; agent_binary: string | null; sandbox_mode: "default" | "off" | null; sandbox_extra_writable_paths: string[]; sandbox_extra_read_only_paths: string[]; sandbox_extra_denied_paths: string[]; permission_mode_override: string | null; created_at: string; updated_at: string; labels: string[]; blockers: Array<{ blocker_id: string; blocker_state: string }>; }
 export interface SymphonyRun { issue_id: string; next_attempt: number; current_attempt: number | null; last_state: string; workspace_path: string; workspace_managed: boolean; next_due_ts: number | null; last_event: string | null; last_event_ts: number | null; last_error: string | null; token_input: number; token_output: number; token_total: number; }
 export interface SymphonyEvent { id: string; issue_id: string; ts: number; kind: string; message: string; payload_json: string | null; }
+export interface Comment { id: string; issue_id: string; ts: number; author: string; body: string; metadata: unknown | null; }
+export interface Artifact { id: string; issue_id: string; attempt: number; source: "git_diff"; kind: string; label: string | null; path: string | null; content: string | null; metadata_json: string | null; content_size: number; mime_type: string; ts: number; }
 
 // Unified request helper with proper error handling
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -52,4 +54,12 @@ export const api = {
   async requestChanges(issueId: string, note: string): Promise<void> { await request<void>(`${BASE}/issues/${issueId}/request-changes`, jsonInit("POST", { note })); },
   async revealWorkspace(issueId: string): Promise<{ ok: boolean; path: string }> { return request<{ ok: boolean; path: string }>(`${BASE}/issues/${issueId}/reveal-workspace`, jsonInit("POST")); },
   fileURL(issueId: string, path: string): string { return `${BASE}/workspaces/${issueId}/file?path=${encodeURIComponent(path)}`; },
+  async listComments(issueId: string): Promise<Comment[]> { return request<Comment[]>(`${BASE}/issues/${issueId}/comments`); },
+  async addComment(issueId: string, body: string, author?: string): Promise<Comment> { return request<Comment>(`${BASE}/issues/${issueId}/comments`, jsonInit("POST", { body, author })); },
+  async deleteComment(issueId: string, commentId: string): Promise<void> { await request<{ ok: boolean }>(`${BASE}/issues/${issueId}/comments/${commentId}`, { method: "DELETE" }); },
+  async retrigger(issueId: string, opts?: { target_state?: string; note?: string }): Promise<void> { await request<{ ok: boolean }>(`${BASE}/issues/${issueId}/retrigger`, jsonInit("POST", opts ?? {})); },
+  async listArtifacts(issueId: string, attempt?: number): Promise<Artifact[]> { const url = attempt !== undefined ? `${BASE}/issues/${issueId}/artifacts?attempt=${attempt}` : `${BASE}/issues/${issueId}/artifacts`; return request<Artifact[]>(url); },
+  async listRecentArtifacts(limit?: number): Promise<Artifact[]> { const url = limit ? `${BASE}/artifacts?limit=${limit}` : `${BASE}/artifacts`; return request<Artifact[]>(url); },
+  async getArtifact(id: string): Promise<Artifact> { return request<Artifact>(`${BASE}/artifacts/${id}`); },
+  artifactRawURL(id: string): string { return `${BASE}/artifacts/${id}/raw`; },
 };

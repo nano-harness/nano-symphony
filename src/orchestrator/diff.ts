@@ -12,6 +12,17 @@ export interface WorkspaceDiff {
 
 const MAX_DIFF_BYTES = 200 * 1024;
 const GIT_TIMEOUT_MS = 5000;
+const EXCLUDE_PATTERNS = [
+  "logs/",
+  ".nano.yaml",
+  ".nano.yaml.bak",
+  ".nano-agent/",
+  ".claude/",
+  ".mcp.json",
+  ".nano/",
+  ".nano-out/",
+  "artifacts/",
+];
 
 export async function collectWorkspaceDiff(wsPath: string): Promise<WorkspaceDiff> {
   const isGit = await fs.stat(path.join(wsPath, ".git")).then(() => true).catch(() => false);
@@ -25,15 +36,25 @@ export async function collectWorkspaceDiff(wsPath: string): Promise<WorkspaceDif
     };
   }
 
+  const pathspecs = EXCLUDE_PATTERNS.map(p => `:!${p}`);
   const head = await runGit(wsPath, ["rev-parse", "HEAD"]).catch(() => "");
-  const numstat = await runGit(wsPath, ["diff", "--numstat", "HEAD"]).catch(() => "");
-  const namestatus = await runGit(wsPath, ["diff", "--name-status", "HEAD"]).catch(() => "");
-  const stat = await runGit(wsPath, ["diff", "--stat", "HEAD"]).catch(() => "");
-  const fullRaw = await runGit(wsPath, ["diff", "HEAD"]).catch(() => "");
+  const numstat = await runGit(wsPath, ["diff", "--numstat", "HEAD", "--", ...pathspecs]).catch(() => "");
+  const namestatus = await runGit(wsPath, ["diff", "--name-status", "HEAD", "--", ...pathspecs]).catch(() => "");
+  const stat = await runGit(wsPath, ["diff", "--stat", "HEAD", "--", ...pathspecs]).catch(() => "");
+  const fullRaw = await runGit(wsPath, ["diff", "HEAD", "--", ...pathspecs]).catch(() => "");
   const truncated = fullRaw.length > MAX_DIFF_BYTES;
   const diff_unified = truncated ? fullRaw.slice(0, MAX_DIFF_BYTES) : fullRaw;
 
   const changes = parseChanges(numstat, namestatus);
+
+  // Detect untracked files (created by the agent but not yet `git add`-ed)
+  const untrackedRaw = await runGit(wsPath, ["ls-files", "--others", "--exclude-standard"]).catch(() => "");
+  const trackedPaths = new Set(changes.map(c => c.path));
+  for (const filePath of untrackedRaw.trim().split("\n").filter(Boolean)) {
+    if (EXCLUDE_PATTERNS.some(p => filePath === p || filePath.startsWith(p))) continue;
+    if (trackedPaths.has(filePath)) continue;
+    changes.push({ path: filePath, status: "A", additions: 0, deletions: 0 });
+  }
 
   return {
     base_ref: head.trim() || "HEAD",

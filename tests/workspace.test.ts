@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { ensureWorkspace, cleanupWorkspace } from "../src/workspace/manager.ts";
+import { ensureWorkspace } from "../src/workspace/manager.ts";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
@@ -75,46 +75,6 @@ describe("ensureWorkspace", () => {
   });
 });
 
-describe("cleanupWorkspace", () => {
-  const testRoot = path.join(os.tmpdir(), "symphony-cleanup-test");
-
-  beforeEach(async () => {
-    await fs.mkdir(testRoot, { recursive: true });
-  });
-
-  afterEach(async () => {
-    await fs.rm(testRoot, { recursive: true, force: true });
-  });
-
-  test("is no-op when managed=false", async () => {
-    const externalPath = path.join(testRoot, "external");
-    await fs.mkdir(externalPath, { recursive: true });
-    await fs.writeFile(path.join(externalPath, "file.txt"), "content");
-
-    await cleanupWorkspace(externalPath, false);
-
-    // Directory should still exist
-    await fs.stat(externalPath);
-    const content = await fs.readFile(path.join(externalPath, "file.txt"), "utf-8");
-    expect(content).toBe("content");
-  });
-
-  test("removes directory when managed=true", async () => {
-    const managedPath = path.join(testRoot, "managed");
-    await fs.mkdir(managedPath, { recursive: true });
-    await fs.writeFile(path.join(managedPath, "file.txt"), "content");
-
-    await cleanupWorkspace(managedPath, true);
-
-    // Directory should be removed
-    try {
-      await fs.stat(managedPath);
-      expect.unreachable("Directory should have been removed");
-    } catch (err: any) {
-      expect(err.code).toBe("ENOENT");
-    }
-  });
-});
 
 describe("ensureWorkspace git baseline", () => {
   const tmpRoot = path.join(os.tmpdir(), "symphony-git-baseline-test");

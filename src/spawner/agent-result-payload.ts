@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ZodSchema } from "zod";
 
 // .passthrough() allows agent diagnostic fields (termination_cause, cache_key,
 // goal_state.condition, etc.) without rejecting the payload. Declared fields
@@ -29,3 +30,40 @@ export const AgentArtifactsSchema = z.object({
 });
 export type AgentArtifacts = z.infer<typeof AgentArtifactsSchema>;
 
+/**
+ * Parses a JSON line from a text blob (scanning from end), validating against the given Zod schema.
+ * Used by adapters to extract structured result from agent stdout.
+ *
+ * Strategy: try parsing the entire trimmed text as JSON first (handles single-line output),
+ * then scans lines from end to find the first valid match. This handles trailing empty lines,
+ * stderr prefixes, or other noise after the actual result line.
+ *
+ * @returns The parsed value on success, or null if parsing/validation fails.
+ */
+export function parseLastJsonLine<T>(text: string, schema: ZodSchema<T>): T | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  // 1. Try parsing the entire text first (covers single JSON blob output)
+  try {
+    const json = JSON.parse(trimmed);
+    const parsed = schema.safeParse(json);
+    if (parsed.success) return parsed.data;
+  } catch {
+    // Not valid JSON as a whole — fall through to line scan
+  }
+
+  // 2. Scan lines from end, try each (skips trailing blanks and stderr markers)
+  const lines = trimmed.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const json = JSON.parse(line);
+      const parsed = schema.safeParse(json);
+      if (parsed.success) return parsed.data;
+    } catch { continue; }
+  }
+
+  return null;
+}

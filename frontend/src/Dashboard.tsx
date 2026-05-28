@@ -1,6 +1,6 @@
 import { createSignal, createMemo, onMount, onCleanup, For, Show } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
-import { api, type Issue } from "./api";
+import { api, type Issue, type Artifact } from "./api";
 import { IssueModal } from "./IssueModal";
 
 type ViewMode = "list" | "board";
@@ -25,6 +25,8 @@ export function Dashboard() {
   const [editingIssue, setEditingIssue] = createSignal<Issue | null>(null);
   const [deletingId, setDeletingId] = createSignal<string | null>(null);
   const [toast, setToast] = createSignal<{ message: string; type: "success" | "error" } | null>(null);
+  const [recentArtifacts, setRecentArtifacts] = createSignal<Artifact[]>([]);
+  const [artifactsCollapsed, setArtifactsCollapsed] = createSignal(true);
 
   const [viewMode, setViewModeRaw] = createSignal<ViewMode>(
     (() => {
@@ -44,6 +46,7 @@ export function Dashboard() {
 
   onMount(() => {
     load();
+    api.listRecentArtifacts(10).then(setRecentArtifacts).catch(() => {});
     const es = api.streamEvents();
     es.addEventListener("message", (e) => {
       try {
@@ -272,6 +275,40 @@ export function Dashboard() {
           onEdit={handleEdit}
           onDelete={confirmDelete}
         />
+      </Show>
+
+      {/* Recent Artifacts */}
+      <Show when={recentArtifacts().length > 0}>
+        <section class="dashboard-section">
+          <button
+            type="button"
+            class="section-title section-toggle"
+            classList={{ collapsed: artifactsCollapsed() }}
+            aria-expanded={!artifactsCollapsed()}
+            onClick={() => setArtifactsCollapsed((v) => !v)}
+          >
+            <span class="section-toggle-caret">▾</span>
+            <span>Recent Artifacts</span>
+            <span class="section-toggle-count">{recentArtifacts().length}</span>
+          </button>
+          <Show when={!artifactsCollapsed()}>
+            <ul class="artifacts-global-list">
+              <For each={recentArtifacts()}>
+                {(a) => (
+                  <li class="artifact-global-row">
+                    <A href={`/issues/${a.issue_id}`}>
+                      <span class="artifact-label">{a.label ?? a.kind}</span>
+                      <span class="artifact-meta">
+                        <span class={`artifact-kind ${a.kind}`}>{a.kind.replace(/_/g, " ")}</span>
+                        <span class="artifact-size">{a.content_size < 1024 ? `${a.content_size} B` : `${(a.content_size / 1024).toFixed(1)} KB`}</span>
+                      </span>
+                    </A>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </section>
       </Show>
 
       {/* Issue Modal */}

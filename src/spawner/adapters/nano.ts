@@ -1,10 +1,11 @@
 import path from "path";
 import os from "os";
 import { readFile } from "node:fs/promises";
-import { AgentResultSummarySchema } from "../agent-result-payload.ts";
+import { AgentResultSummarySchema, parseLastJsonLine } from "../agent-result-payload.ts";
 import type { AgentResultSummary, AgentArtifacts } from "../agent-result-payload.ts";
 import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation } from "../agent-adapter.ts";
 import type { SpawnContext } from "../types.ts";
+import type { Workflow } from "../../workflow/types.ts";
 
 // Returns platform-specific default read-only paths for native sandbox.
 function platformDefaultReadOnlyPaths(backend: "native" | "docker" | "none"): string[] {
@@ -135,21 +136,31 @@ export const nanoAdapter: AgentAdapter = {
   },
 
   buildSpawnInvocation(ctx: SpawnContext): SpawnInvocation {
-    const args = ["binary", "exec", "--sandbox=on",
+    const sandboxBackend = ctx.sandboxConfig?.backend ?? "native";
+    const sandboxEnabled = sandboxBackend !== "none";
+    const sandboxFlag = sandboxEnabled ? "on" : "off";
+    const args = [`binary`, "exec", `--sandbox=${sandboxFlag}`,
       "--config", ".nano/nano.yaml",
       "--output-dir", ctx.outputDir];
     if (ctx.permissionMode) {
       args.push(`--permission-mode=${ctx.permissionMode}`);
     }
 
+    const allowedPaths = [
+      ctx.workspace,
+      ...(ctx.sandboxConfig?.extra_writable_paths ?? []),
+      ...(ctx.sandboxConfig?.extra_read_only_paths ?? []),
+    ].filter(Boolean).join(":");
+
     const env: Record<string, string> = {
       SYMPHONY_TOKEN: ctx.token,
       SYMPHONY_ISSUE_ID: ctx.issueId,
       SYMPHONY_WORKSPACE: ctx.workspace,
       SYMPHONY_MCP_URL: ctx.mcpUrl,
-      NANO_SANDBOX_NETWORK_ACCESS: "true",
-      NANO_SANDBOX_ENABLED: "true",
-      NANO_SANDBOX_BACKEND: ctx.sandboxConfig?.backend ?? "native",
+      NANO_SANDBOX_ENABLED: sandboxEnabled ? "true" : "false",
+      NANO_SANDBOX_NETWORK_ACCESS: String(ctx.sandboxConfig?.network_access ?? true),
+      NANO_SANDBOX_BACKEND: sandboxBackend,
+      NANO_SANDBOX_ALLOWED_PATHS: allowedPaths,
       NANO_LOG_LEVEL: "info",
     };
     if (ctx.permissionMode) {
@@ -162,13 +173,7 @@ export const nanoAdapter: AgentAdapter = {
   },
 
   parseResult(stdout: string): AgentResultSummary | null {
-    const trimmed = stdout.trim();
-    if (!trimmed) return null;
-    const lastLine = trimmed.split("\n").pop()!.trim();
-    let json: unknown;
-    try { json = JSON.parse(lastLine); } catch { return null; }
-    const parsed = AgentResultSummarySchema.safeParse(json);
-    return parsed.success ? parsed.data : null;
+    return parseLastJsonLine(stdout, AgentResultSummarySchema);
   },
 
   async collectArtifacts(ctx: SpawnContext): Promise<AgentArtifacts> {
@@ -178,6 +183,25 @@ export const nanoAdapter: AgentAdapter = {
     } catch {
       return {};
     }
+  },
+
+  resolvePermissionMode(agentConfig: Workflow["agent"] | undefined): string | undefined {
+    return agentConfig?.permission_mode
+      ?? (agentConfig?.permission_auto ? "auto" : "default");
+  },
+
+  applyPermissionFloor(ctx: {
+    resolvedPermissionMode: string | undefined;
+    sandboxOff: boolean;
+    agentConfig: Workflow["agent"] | undefined;
+  }): { resolvedPermissionMode: string | undefined; floored: { from: string; to: string } | null } {
+    const PERMISSIVE_MODES = new Set(["yolo", "acceptEdits"]);
+    if (ctx.sandboxOff && ctx.resolvedPermissionMode && PERMISSIVE_MODES.has(ctx.resolvedPermissionMode)) {
+      const original = ctx.resolvedPermissionMode;
+      const adjusted = ctx.agentConfig?.permission_auto ? "auto" : "default";
+      return { resolvedPermissionMode: adjusted, floored: { from: original, to: adjusted } };
+    }
+    return { resolvedPermissionMode: ctx.resolvedPermissionMode, floored: null };
   },
 };
 

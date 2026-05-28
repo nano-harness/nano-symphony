@@ -20,18 +20,14 @@ agent:
   # - plan: block all actions until user confirms execution plan
   permission_mode: auto
   # Optional: configure auto mode behavior (only used when permission_mode=auto)
-  # permission_auto:
-  #   backend: llm            # llm = LLM-backed classifier (recommended); fail_closed = block everything requiring approval
-  #   model: claude-haiku-3-5 # optional: override LLM model for classifier (default: reuse agent's main model)
-  #   confidence_threshold: 0.8 # block if classifier confidence < threshold (0.0-1.0, default 0.8)
-  #   timeout_seconds: 5      # classifier timeout; fail-open to default mode on timeout
-  #   cache_ttl_minutes: 30   # cache classifier decisions to reduce LLM calls
-  #   # Trust declaration (the ONLY mechanism to pre-allow commands in auto mode).
-  #   # Specifiers are interpreted by nano-agent (segment-level fast-path for compound commands).
-  #   # allow_rules: ["Bash(vwsd *)", "Bash(sngs *)"]
-  #   # Denial tracker thresholds; 0 means "use nano-agent defaults".
-  #   # denial_max_consecutive: 0
-  #   # denial_max_total: 0
+  permission_auto:
+    backend: llm
+    confidence_threshold: 0.8
+    timeout_seconds: 5
+    cache_ttl_minutes: 30
+    allow_rules: ["Bash(vwsd *)", "Bash(sngs *)"]
+    denial_max_consecutive: 0
+    denial_max_total: 0
 workspace:
   root: ./workspaces
   # When true (default), symphony auto-runs `git init && git commit --allow-empty`

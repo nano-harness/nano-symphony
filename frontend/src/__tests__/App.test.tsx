@@ -22,6 +22,10 @@ vi.mock("../api", () => ({
     resumeRun: vi.fn(async () => {}),
     getWorkflow: vi.fn(async () => ({ content: "" })),
     saveWorkflow: vi.fn(async () => {}),
+    listRecentArtifacts: vi.fn(async () => []),
+    listArtifacts: vi.fn(async () => []),
+    getArtifact: vi.fn(async () => ({})),
+    artifactRawURL: vi.fn(() => ""),
   },
 }));
 
@@ -47,7 +51,8 @@ describe("App entry", () => {
   it("renders the StatusBar layout (root prop wiring)", async () => {
     render(() => <App />);
     // Look for the brand name in the conductor bar
-    expect(await screen.findByText(/nano.*symphony/i)).toBeInTheDocument();
+    const brands = await screen.findAllByText(/nano.*symphony/i);
+    expect(brands[0]).toBeInTheDocument();
     // Look for the tempo indicator (AT REST or CONDUCTING)
     expect(await screen.findByText(/at rest|conducting/i)).toBeInTheDocument();
   });
@@ -75,7 +80,8 @@ describe("App entry", () => {
     render(() => <App />);
 
     // StatusBar content should be present
-    expect(await screen.findByText(/nano.*symphony/i)).toBeInTheDocument();
+    const brands = await screen.findAllByText(/nano.*symphony/i);
+    expect(brands[0]).toBeInTheDocument();
 
     // Dashboard content should also be present (proving both render)
     expect(await screen.findByText(/the score/i)).toBeInTheDocument();
@@ -95,7 +101,8 @@ describe("StatusBar", () => {
       </Router>
     ));
     // Brand name should be visible
-    expect(await screen.findByText(/nano.*symphony/i)).toBeInTheDocument();
+    const brands = await screen.findAllByText(/nano.*symphony/i);
+    expect(brands[0]).toBeInTheDocument();
     // Default state should be "AT REST" (no active runs)
     expect(await screen.findByText(/at rest/i)).toBeInTheDocument();
   });
@@ -103,7 +110,8 @@ describe("StatusBar", () => {
   it("brand links to dashboard so users can always return home", async () => {
     render(() => <App />);
     // Find the brand name text
-    const brandText = await screen.findByText(/nano.*symphony/i);
+    const brands = await screen.findAllByText(/nano.*symphony/i);
+    const brandText = brands[0];
     // Check that it's within a link element
     const linkElement = brandText.closest("a");
     expect(linkElement).not.toBeNull();

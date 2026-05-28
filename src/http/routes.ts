@@ -12,10 +12,15 @@ import { nullishString } from "./schemas.ts";
 import { bus } from "../db/event_bus.ts";
 import type { SymphonyEvent, SymphonyRun } from "../db/tracker.ts";
 import type { RunPatch } from "../db/event_bus.ts";
+import { cancelAgent, getActiveProcessCount } from "../spawner/index.ts";
 
 const IDENT_RE = /^[A-Z][A-Z0-9]*-\d+$/;
 const VALID_STATES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"] as const;
 const AgentKindEnum = z.enum(["nano", "claude-code"]).nullable().optional();
+
+// SSE connection limit to prevent listener accumulation
+const MAX_SSE_CONNECTIONS = 50;
+let activeSSECount = 0;
 
 const IssueCreateSchema = z.object({
   id: nullishString(),
@@ -31,6 +36,9 @@ const IssueCreateSchema = z.object({
   agent_binary: nullishString({ max: 256 }),
   sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
   sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
+  sandbox_extra_read_only_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
+  sandbox_extra_denied_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
+  permission_mode_override: nullishString({ max: 64 }),
   labels: z.array(z.string()).default([]),
 });
 
@@ -46,6 +54,9 @@ const IssueUpdateSchema = z.object({
   agent_binary: nullishString({ max: 256 }),
   sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
   sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
+  sandbox_extra_read_only_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
+  sandbox_extra_denied_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
+  permission_mode_override: nullishString({ max: 64 }),
   labels: z.array(z.string()).optional(),
 }).strict(); // Reject unexpected fields like identifier or id
 
@@ -56,6 +67,27 @@ export function createRoutes(
   options?: { reloadWorkflow?: () => { workflow: Workflow; template: string } | null },
 ): Hono {
   const app = new Hono();
+  const startedAt = Date.now();
+
+  app.get("/health", (c) => {
+    const workflowLoaded = _getWorkflow() !== undefined;
+    const inflightAgents = getActiveProcessCount();
+    const issues = tracker.listIssues();
+    const queueDepth = issues.filter((i) =>
+      !["done", "cancelled", "backlog"].includes(i.state)
+    ).length;
+
+    const status = workflowLoaded ? "ok" : "degraded";
+    return c.json({
+      status,
+      orchestrator_running: true,
+      db_reachable: true,
+      workflow_loaded: workflowLoaded,
+      inflight_agents: inflightAgents,
+      queue_depth: queueDepth,
+      uptime_ms: Date.now() - startedAt,
+    });
+  });
 
   app.get("/issues", (c) => {
     const state = c.req.query("state");
@@ -116,7 +148,11 @@ export function createRoutes(
   });
 
   app.get("/events/stream", (c) => {
+    if (activeSSECount >= MAX_SSE_CONNECTIONS) {
+      return c.json({ error: "Too many SSE connections" }, 503);
+    }
     return streamSSE(c, async (stream) => {
+      activeSSECount++;
       // Support Last-Event-ID for reconnection catch-up
       const lastEventId = c.req.header("Last-Event-ID");
       const querySince = c.req.query("since");
@@ -168,6 +204,7 @@ export function createRoutes(
 
       // Cleanup on abort
       c.req.raw.signal.addEventListener("abort", () => {
+        activeSSECount--;
         bus.off("event", onEvent);
         bus.off("run", onRun);
         clearInterval(heartbeatInterval);
@@ -178,7 +215,12 @@ export function createRoutes(
     });
   });
 
-  app.post("/runs/:issueId/cancel", (c) => { tracker.releaseIssue(c.req.param("issueId"), "cancelled"); return c.json({ ok: true }); });
+  app.post("/runs/:issueId/cancel", (c) => {
+    const issueId = c.req.param("issueId");
+    cancelAgent(issueId); // Kill the process first (no-op if not running)
+    tracker.releaseIssue(issueId, "cancelled");
+    return c.json({ ok: true });
+  });
   app.post("/runs/:issueId/pause", (c) => { tracker.releaseIssue(c.req.param("issueId"), "paused"); return c.json({ ok: true }); });
   app.post("/runs/:issueId/resume", (c) => { tracker.releaseIssue(c.req.param("issueId"), "released"); return c.json({ ok: true }); });
 
@@ -359,6 +401,184 @@ export function createRoutes(
     } catch {
       return c.json({ error: "file not found" }, 404);
     }
+  });
+
+  // --- Comments CRUD ---
+
+  const CommentCreateSchema = z.object({
+    body: z.string().min(1).max(8000),
+    author: z.string().max(64).optional(),
+  }).strict();
+
+  app.post("/issues/:id/comments", async (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const parsed = CommentCreateSchema.safeParse(await c.req.json());
+    if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
+    const comment = tracker.addComment(id, { body: parsed.data.body, author: parsed.data.author });
+    tracker.recordEvent(id, "comment_added", parsed.data.body.slice(0, 120), { comment_id: comment.id, author: comment.author });
+    return c.json(comment, 201);
+  });
+
+  app.get("/issues/:id/comments", (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const since = c.req.query("since");
+    const comments = tracker.listComments(id, since ? { since: Number(since) } : undefined);
+    return c.json(comments);
+  });
+
+  app.delete("/issues/:id/comments/:commentId", (c) => {
+    const id = c.req.param("id");
+    const commentId = c.req.param("commentId");
+    const deleted = tracker.deleteComment(commentId);
+    if (deleted) {
+      tracker.recordEvent(id, "comment_deleted", `Comment ${commentId} deleted`, { comment_id: commentId });
+    }
+    return c.json({ ok: true, deleted });
+  });
+
+  // --- Retrigger ---
+
+  const RetriggerSchema = z.object({
+    target_state: z.enum(["todo", "in_progress", "in_review"]).default("todo"),
+    reset_blocker_fingerprint: z.boolean().default(true),
+    note: z.string().max(8000).optional(),
+  }).strict();
+
+  app.post("/issues/:id/retrigger", async (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = RetriggerSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
+    const { target_state, reset_blocker_fingerprint, note } = parsed.data;
+
+    // Optional note → addComment
+    if (note?.trim()) {
+      const noteComment = tracker.addComment(id, { body: note, author: "operator" });
+      tracker.recordEvent(id, "comment_added", note.slice(0, 120), { comment_id: noteComment.id, author: "operator" });
+    }
+
+    const fromState = issue.state;
+
+    // Reset state
+    if (issue.state !== target_state) {
+      tracker.updateIssueState(id, target_state);
+    }
+    // Critical: clear last_issue_state so candidate SQL picks it up
+    tracker.updateLastIssueState(id, "");
+
+    // Release run if in non-released state
+    const run = tracker.getRun(id);
+    if (run && run.last_state !== "released") {
+      tracker.releaseIssue(id, "released");
+    }
+
+    // Reset blocker fingerprint
+    if (reset_blocker_fingerprint) {
+      tracker.updateLastBlockerFingerprint(id, null);
+    }
+
+    const commentsTotal = tracker.countComments(id);
+    tracker.recordEvent(id, "retrigger_requested", `Retrigger: ${fromState} → ${target_state}`, {
+      from_state: fromState,
+      to_state: target_state,
+      reset_blocker_fingerprint,
+      note_attached: !!note?.trim(),
+      comments_total: commentsTotal,
+    });
+
+    triggerTick();
+    return c.json({ ok: true });
+  });
+
+  // TODO: Long-term, request-changes could be implemented as addComment + retrigger
+  // to unify the two flows. For now they coexist with different semantics.
+
+  // ─── Artifacts ───────────────────────────────────────────────
+
+  app.get("/artifacts", (c) => {
+    const limit = Math.min(Number(c.req.query("limit") ?? 20), 100);
+    const artifacts = tracker.listRecentArtifacts(limit);
+    const items = artifacts.map(({ content, storage_path, ...rest }) => rest);
+    return c.json(items);
+  });
+
+  app.get("/issues/:id/artifacts", (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const attemptStr = c.req.query("attempt");
+    const attempt = attemptStr !== undefined ? Number.parseInt(attemptStr, 10) : undefined;
+    const artifacts = tracker.listArtifacts(id, attempt);
+    // Omit content from list response to keep payload small
+    const items = artifacts.map(({ content, storage_path, ...rest }) => rest);
+    return c.json(items);
+  });
+
+  app.get("/artifacts/:id", (c) => {
+    const artifact = tracker.getArtifact(c.req.param("id"));
+    if (!artifact) return c.json({ error: "Not found" }, 404);
+    // Omit storage_path from response (internal implementation detail)
+    const { storage_path, ...rest } = artifact;
+    return c.json(rest);
+  });
+
+  app.get("/artifacts/:id/raw", async (c) => {
+    const artifact = tracker.getArtifact(c.req.param("id"));
+    if (!artifact) return c.json({ error: "Not found" }, 404);
+
+    const disposition = `attachment; filename="${artifact.label ?? artifact.id}"`;
+
+    if (artifact.storage_path) {
+      try {
+        const data = await fs.readFile(artifact.storage_path);
+        return new Response(data, {
+          headers: {
+            "Content-Type": artifact.mime_type,
+            "Content-Disposition": disposition,
+          },
+        });
+      } catch {
+        return c.json({ error: "File not found on disk" }, 404);
+      }
+    }
+
+    if (artifact.content) {
+      return new Response(artifact.content, {
+        headers: {
+          "Content-Type": artifact.mime_type,
+          "Content-Disposition": disposition,
+        },
+      });
+    }
+
+    // Workspace fallback: resolve file from workspace if artifact has a path
+    if (artifact.path) {
+      const run = tracker.getRun(artifact.issue_id);
+      if (run?.workspace_path) {
+        const workspaceRoot = path.resolve(run.workspace_path);
+        const full = path.normalize(path.resolve(workspaceRoot, artifact.path));
+        // Path escape check
+        if (full === workspaceRoot || full.startsWith(workspaceRoot + path.sep)) {
+          try {
+            const data = await fs.readFile(full);
+            return new Response(data, {
+              headers: {
+                "Content-Type": artifact.mime_type,
+                "Content-Disposition": disposition,
+              },
+            });
+          } catch { /* fall through to 404 */ }
+        }
+      }
+    }
+
+    return c.json({ error: "No content available" }, 404);
   });
 
   return app;

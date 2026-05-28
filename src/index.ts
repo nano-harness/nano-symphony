@@ -7,6 +7,7 @@ import { loadWorkflow, watchWorkflow } from "./workflow/loader.ts";
 import { createHttpServer } from "./http/server.ts";
 import { createOrchestrator } from "./orchestrator/index.ts";
 import { bus } from "./db/event_bus.ts";
+import { getActiveProcessCount, killAllAgents } from "./spawner/index.ts";
 import type { Workflow } from "./workflow/types.ts";
 
 const logger = pino({ level: config.LOG_LEVEL });
@@ -14,6 +15,15 @@ const logger = pino({ level: config.LOG_LEVEL });
 async function main() {
   const db = new Database(config.DB_PATH, { create: true });
   runMigrations(db);
+
+  // Recover runs stuck in 'claimed' from unclean shutdown
+  const staleRecovery = db.prepare(
+    `UPDATE symphony_runs SET last_state = 'released' WHERE last_state = 'claimed'`
+  ).run();
+  if (staleRecovery.changes > 0) {
+    logger.warn({ count: staleRecovery.changes }, "Recovered stale claimed runs from unclean shutdown");
+  }
+
   const tracker = createTracker(db);
   let currentWorkflow: { workflow: Workflow; template: string } | undefined;
   try { currentWorkflow = loadWorkflow(config.WORKFLOW_PATH); } catch (err) { logger.warn({ err }, "Could not load workflow"); }
@@ -34,6 +44,7 @@ async function main() {
     }
   };
   const orchestrator = createOrchestrator(tracker, getWorkflow, logger);
+
   const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick(), { reloadWorkflow });
   const server = Bun.serve({
     port: config.PORT,
@@ -43,7 +54,22 @@ async function main() {
   logger.info({ port: config.PORT }, "HTTP server listening");
   maybeOpenBrowser(`http://localhost:${config.PORT}`, logger);
   orchestrator.start();
-  const shutdown = async () => { await orchestrator.stop(); server.stop(); db.close(); process.exit(0); };
+  const shutdown = async () => {
+    await orchestrator.stop();
+    // Wait for inflight agents to finish (max 30s)
+    const deadline = Date.now() + 30_000;
+    while (getActiveProcessCount() > 0 && Date.now() < deadline) {
+      await Bun.sleep(500);
+    }
+    if (getActiveProcessCount() > 0) {
+      logger.warn({ remaining: getActiveProcessCount() }, "Force-killing remaining agents");
+      killAllAgents();
+      await Bun.sleep(1000);
+    }
+    server.stop();
+    db.close();
+    process.exit(0);
+  };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 }

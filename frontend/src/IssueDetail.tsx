@@ -1,8 +1,16 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
 import { useParams, useNavigate, A } from "@solidjs/router";
-import { api, type Issue, type SymphonyEvent, type SymphonyRun } from "./api";
+import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment } from "./api";
 import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
+import { ArtifactsPanel } from "./ArtifactsPanel";
+import { EventBody } from "./EventBody";
+import { LogViewer } from "./LogViewer";
+
+const AGENT_DISPLAY_NAMES: Record<string, string> = {
+  "nano": "Nano",
+  "claude-code": "Claude Code",
+};
 
 export function IssueDetail() {
   const params = useParams<{ id: string }>();
@@ -14,16 +22,23 @@ export function IssueDetail() {
   const [showModal, setShowModal] = createSignal(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
   const [toast, setToast] = createSignal<{ message: string; type: "success" | "error" } | null>(null);
+  const [comments, setComments] = createSignal<Comment[]>([]);
+  const [newComment, setNewComment] = createSignal("");
+  const [showRetriggerNote, setShowRetriggerNote] = createSignal(false);
+  const [retriggerNote, setRetriggerNote] = createSignal("");
+  const [showCancelConfirm, setShowCancelConfirm] = createSignal(false);
 
   const load = async () => {
-    const [i, e, r] = await Promise.all([
+    const [i, e, r, c] = await Promise.all([
       api.getIssue(params.id),
       api.getEvents(),
       api.getRun(params.id).catch(() => null),
+      api.listComments(params.id).catch(() => []),
     ]);
     setIssue(i);
     setEvents(e.filter((ev) => ev.issue_id === params.id).sort((a, b) => a.ts - b.ts));
     setRun(r);
+    setComments(c);
   };
 
   // Refresh issue and run data (for live updates)
@@ -54,6 +69,14 @@ export function IssueDetail() {
             if (prev.some((ev) => ev.id === event.id)) return prev;
             return [...prev, event].sort((a, b) => a.ts - b.ts);
           });
+          // Refresh comments on comment events
+          if (event.kind === "comment_added" || event.kind === "comment_deleted") {
+            api.listComments(params.id).then(setComments).catch(() => {});
+          }
+          // Refresh issue on retrigger
+          if (event.kind === "retrigger_requested") {
+            refreshIssueAndRun();
+          }
         }
       } catch {}
     });
@@ -149,6 +172,52 @@ export function IssueDetail() {
     showToast("Changes saved");
   };
 
+  const handleAddComment = async () => {
+    const body = newComment().trim();
+    if (!body) return;
+    try {
+      await api.addComment(params.id, body);
+      setNewComment("");
+      const c = await api.listComments(params.id);
+      setComments(c);
+    } catch (err) {
+      showToast("Failed to add comment", "error");
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    try {
+      await api.deleteComment(params.id, commentId);
+      const c = await api.listComments(params.id);
+      setComments(c);
+    } catch (err) {
+      showToast("Failed to delete comment", "error");
+    }
+  };
+
+  const handleRetrigger = async (note?: string) => {
+    try {
+      await api.retrigger(params.id, note ? { note } : undefined);
+      showToast("Retrigger requested");
+      setShowRetriggerNote(false);
+      setRetriggerNote("");
+      await refreshIssueAndRun();
+    } catch (err) {
+      showToast("Retrigger failed", "error");
+    }
+  };
+
+  const handleCancel = async () => {
+    try {
+      await api.cancelRun(params.id);
+      showToast("Run cancelled");
+      setShowCancelConfirm(false);
+      await refreshIssueAndRun();
+    } catch (err) {
+      showToast("Failed to cancel run", "error");
+    }
+  };
+
   const formatTime = (ts: number) => {
     const date = new Date(ts);
     return date.toLocaleString();
@@ -177,6 +246,25 @@ export function IssueDetail() {
                   <h1 class="page-title">{issue()!.title}</h1>
                 </div>
                 <div class="issue-actions">
+                  <button
+                    class="btn btn-secondary"
+                    onClick={() => handleRetrigger()}
+                    disabled={run()?.last_state === "claimed"}
+                    title={run()?.last_state === "claimed" ? "Already running" : "Retrigger this issue"}
+                  >
+                    ↻ Retrigger
+                  </button>
+                  <button class="btn btn-secondary" title="Retrigger with note" onClick={() => setShowRetriggerNote(true)}>
+                    ↻+
+                  </button>
+                  <button
+                    class="btn btn-secondary"
+                    onClick={() => setShowCancelConfirm(true)}
+                    disabled={run()?.last_state !== "claimed"}
+                    title={run()?.last_state === "claimed" ? "Cancel running agent" : "No active run to cancel"}
+                  >
+                    ⏹ Cancel
+                  </button>
                   <button class="btn btn-secondary" onClick={() => setShowModal(true)}>
                     ✎ Edit
                   </button>
@@ -205,10 +293,44 @@ export function IssueDetail() {
 
             <HandoffPanel issueId={params.id} issueState={issue()!.state} />
 
+            <ArtifactsPanel issueId={params.id} maxAttempt={run()?.next_attempt ? run()!.next_attempt - 1 : 0} />
+
+            <div class="issue-section">
+              <h2 class="section-title">Comments ({comments().length})</h2>
+              <Show when={comments().length > 0}>
+                <ul class="comments-list">
+                  <For each={comments()}>
+                    {(comment) => (
+                      <li class="comment-card">
+                        <div class="comment-header">
+                          <span class="comment-author">{comment.author}</span>
+                          <span class="comment-time">{formatTime(comment.ts)}</span>
+                          <button class="btn-icon comment-delete" onClick={() => handleDeleteComment(comment.id)} title="Delete comment">×</button>
+                        </div>
+                        <div class="comment-body">{comment.body}</div>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+              <div class="comment-form">
+                <textarea
+                  class="comment-input"
+                  placeholder="Add a comment..."
+                  value={newComment()}
+                  onInput={(e) => setNewComment(e.currentTarget.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleAddComment(); }}
+                />
+                <button class="btn btn-secondary" onClick={handleAddComment} disabled={!newComment().trim()}>
+                  Submit
+                </button>
+              </div>
+            </div>
+
             <Show when={logs()}>
               <div class="issue-section">
                 <h2 class="section-title">III. STAGE — Live transcript</h2>
-                <pre class="logs-pane">{logs()}</pre>
+                <LogViewer rawText={logs()} agentKind={issue()!.agent_kind} />
               </div>
             </Show>
 
@@ -230,12 +352,7 @@ export function IssueDetail() {
                           </div>
                           <div class="event-message">{event.message}</div>
                           <Show when={payload}>
-                            <details class="event-payload">
-                              <summary>View details</summary>
-                              <pre style="margin-top: 8px; font-size: 11px; overflow-x: auto;">
-                                {JSON.stringify(payload, null, 2)}
-                              </pre>
-                            </details>
+                            <EventBody kind={event.kind} payload={payload} />
                           </Show>
                         </li>
                       );
@@ -250,7 +367,9 @@ export function IssueDetail() {
             <h3 class="aside-title">Score Sheet</h3>
             <div class="aside-field">
               <div class="aside-label">State</div>
-              <div class="aside-value">{issue()!.state.replace("_", " ")}</div>
+              <div class="aside-value">
+                <span class={`pill ${issue()!.state}`}>{issue()!.state.replace("_", " ")}</span>
+              </div>
             </div>
             <div class="aside-field">
               <div class="aside-label">Priority</div>
@@ -258,7 +377,7 @@ export function IssueDetail() {
             </div>
             <div class="aside-field">
               <div class="aside-label">Agent</div>
-              <div class="aside-value">{issue()!.agent_kind ?? "workflow default"}</div>
+              <div class="aside-value">{AGENT_DISPLAY_NAMES[issue()!.agent_kind ?? ""] ?? issue()!.agent_kind ?? "workflow default"}</div>
             </div>
             <Show when={issue()!.agent_binary}>
               <div class="aside-field">
@@ -271,9 +390,7 @@ export function IssueDetail() {
               <div class="aside-value">
                 {issue()!.sandbox_mode === "off"
                   ? "Disabled (per-issue)"
-                  : issue()!.agent_kind === "claude-code"
-                    ? "⚠ Unmanaged (claude-code)"
-                    : "Default"}
+                  : "Default"}
               </div>
             </div>
             <Show when={(issue()!.sandbox_extra_writable_paths ?? []).length > 0}>
@@ -330,6 +447,13 @@ export function IssueDetail() {
                   >
                     ⎘
                   </button>
+                  <button
+                    class="btn-icon"
+                    onClick={() => api.revealWorkspace(params.id)}
+                    title="Open in Finder"
+                  >
+                    ↗
+                  </button>
                 </div>
                 <div class="workspace-badge">
                   <span class={`pill ${run()!.workspace_managed ? "managed" : "external"}`}>
@@ -378,6 +502,54 @@ export function IssueDetail() {
               </button>
               <button class="btn btn-danger" onClick={handleDelete}>
                 Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Cancel Confirmation */}
+      <Show when={showCancelConfirm()}>
+        <div class="modal-backdrop" onClick={() => setShowCancelConfirm(false)}>
+          <div class="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-chapter-mark"></div>
+            <div class="modal-confirm-body">
+              <h3 class="modal-confirm-title">FERMATA</h3>
+              <p class="modal-confirm-message">Terminate the running process?</p>
+            </div>
+            <div class="modal-confirm-footer">
+              <button class="btn btn-ghost" onClick={() => setShowCancelConfirm(false)}>
+                Keep running
+              </button>
+              <button class="btn btn-danger" onClick={handleCancel}>
+                Cancel Run
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Retrigger with Note Modal */}
+      <Show when={showRetriggerNote()}>
+        <div class="modal-backdrop" onClick={() => setShowRetriggerNote(false)}>
+          <div class="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-chapter-mark"></div>
+            <div class="modal-confirm-body">
+              <h3 class="modal-confirm-title">Retrigger with note</h3>
+              <textarea
+                class="comment-input"
+                placeholder="Add a note for the next attempt..."
+                value={retriggerNote()}
+                onInput={(e) => setRetriggerNote(e.currentTarget.value)}
+                style="width: 100%; min-height: 80px;"
+              />
+            </div>
+            <div class="modal-confirm-footer">
+              <button class="btn btn-ghost" onClick={() => setShowRetriggerNote(false)}>
+                Cancel
+              </button>
+              <button class="btn btn-secondary" onClick={() => handleRetrigger(retriggerNote())}>
+                Retrigger
               </button>
             </div>
           </div>

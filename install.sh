@@ -154,9 +154,10 @@ install_symphony() {
     # Create install directory
     mkdir -p "${INSTALL_DIR}"
 
-    # Extract archive (overwrite existing source files, preserve user data)
+    # Extract archive; exclude user-config files so they survive updates.
+    # Fresh-install initialization happens in the guards below.
     log_info "Extracting archive to ${INSTALL_DIR}..."
-    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}"
+    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}" --exclude='WORKFLOW.md' --exclude='.env'
 
     # Install dependencies
     log_info "Installing dependencies with bun..."

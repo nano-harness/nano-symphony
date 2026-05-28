@@ -149,7 +149,7 @@ export function HandoffPanel(props: HandoffPanelProps) {
               <For each={handoff()?.payload?.artifacts}>
                 {(artifact: any) => (
                   <li class="artifact-item">
-                    <span class="artifact-kind">{artifact.kind}</span>
+                    <span class={`artifact-kind ${artifact.kind}`}>{artifact.kind.replace(/_/g, " ")}</span>
                     <span class="artifact-detail">{artifact.path || artifact.label || artifact.href}</span>
                   </li>
                 )}

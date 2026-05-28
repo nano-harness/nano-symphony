@@ -64,3 +64,36 @@ CREATE TABLE IF NOT EXISTS symphony_state (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS issue_comments (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  author TEXT NOT NULL DEFAULT 'operator',
+  body TEXT NOT NULL,
+  metadata_json TEXT,
+  FOREIGN KEY (issue_id) REFERENCES issues(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_comments_issue_ts
+  ON issue_comments(issue_id, ts ASC);
+
+CREATE TABLE IF NOT EXISTS symphony_artifacts (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('mcp', 'git_diff')),
+  kind TEXT NOT NULL,
+  label TEXT,
+  path TEXT,
+  content TEXT,
+  metadata_json TEXT,
+  storage_path TEXT,
+  content_size INTEGER DEFAULT 0,
+  mime_type TEXT DEFAULT 'application/octet-stream',
+  ts INTEGER NOT NULL,
+  FOREIGN KEY (issue_id) REFERENCES issues(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_symphony_artifacts_issue_attempt
+  ON symphony_artifacts(issue_id, attempt, ts ASC);

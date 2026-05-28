@@ -21,6 +21,15 @@ export function IssueModal(props: IssueModalProps) {
   const [sandboxExtraWritablePaths, setSandboxExtraWritablePaths] = createSignal(
     (props.issue?.sandbox_extra_writable_paths || []).join("\n")
   );
+  const [sandboxExtraReadOnlyPaths, setSandboxExtraReadOnlyPaths] = createSignal(
+    (props.issue?.sandbox_extra_read_only_paths || []).join("\n")
+  );
+  const [sandboxExtraDeniedPaths, setSandboxExtraDeniedPaths] = createSignal(
+    (props.issue?.sandbox_extra_denied_paths || []).join("\n")
+  );
+  const [permissionModeOverride, setPermissionModeOverride] = createSignal<string>(
+    props.issue?.permission_mode_override ?? ""
+  );
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [touched, setTouched] = createSignal({ title: false });
@@ -55,6 +64,15 @@ export function IssueModal(props: IssueModalProps) {
           .split("\n")
           .map((p) => p.trim())
           .filter((p) => p),
+        sandbox_extra_read_only_paths: sandboxExtraReadOnlyPaths()
+          .split("\n")
+          .map((p) => p.trim())
+          .filter((p) => p),
+        sandbox_extra_denied_paths: sandboxExtraDeniedPaths()
+          .split("\n")
+          .map((p) => p.trim())
+          .filter((p) => p),
+        permission_mode_override: permissionModeOverride().trim() || null,
         labels: labels()
           .split(",")
           .map((l) => l.trim())
@@ -180,7 +198,7 @@ export function IssueModal(props: IssueModalProps) {
                   onChange={(e) => setAgentKind(e.currentTarget.value)}
                 >
                   <option value="">Workflow default</option>
-                  <option value="nano">nano-agent</option>
+                  <option value="nano">Nano</option>
                   <option value="claude-code">Claude Code</option>
                 </select>
               </div>
@@ -200,39 +218,41 @@ export function IssueModal(props: IssueModalProps) {
               </div>
             </div>
 
-            <Show when={agentKind() === "claude-code"}>
-              <div class="form-hint" style="color: var(--color-warning, #b08800); margin-bottom: 8px;">
-                ⚠ Sandbox features are managed by Claude Code; per-issue overrides are not applied.
+            <Show when={agentKind() === "claude-code" && sandboxMode() !== "off"}>
+              <div class="form-hint" style="color: var(--mute); margin-bottom: 8px;">
+                Claude Code sandbox 通过 <code>.claude/settings.local.json</code> 配置。
               </div>
             </Show>
 
-            <Show when={agentKind() !== "claude-code"}>
-              <div class="form-row">
-                <div class="form-field">
-                  <label class="form-label" for="sandbox_mode">
-                    Sandbox
-                  </label>
-                  <select
-                    id="sandbox_mode"
-                    class="form-select"
-                    value={sandboxMode()}
-                    onChange={(e) => setSandboxMode(e.currentTarget.value)}
-                  >
-                    <option value="">Default</option>
-                    <option value="off">Disabled</option>
-                  </select>
-                </div>
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label" for="sandbox_mode">
+                  Sandbox
+                </label>
+                <select
+                  id="sandbox_mode"
+                  class="form-select"
+                  value={sandboxMode()}
+                  onChange={(e) => setSandboxMode(e.currentTarget.value)}
+                >
+                  <option value="">Default</option>
+                  <option value="off">Disabled</option>
+                </select>
               </div>
+            </div>
 
-              <Show when={sandboxMode() === "off"}>
-                <div class="form-hint" style="color: var(--color-error, #cc3333); margin-bottom: 8px;">
-                  <strong>⚠ Sandbox disabled.</strong> Filesystem and network isolation are off for this issue.
-                  The worker will floor <code>permission_mode</code> to <code>auto</code> (or <code>default</code> if
+            <Show when={sandboxMode() === "off"}>
+              <div class="form-hint" style="color: var(--color-error, #cc3333); margin-bottom: 8px;">
+                <strong>⚠ Sandbox disabled.</strong> Filesystem and network isolation are off for this issue.
+                {agentKind() !== "claude-code" && <>
+                  {" "}The worker will floor <code>permission_mode</code> to <code>auto</code> (or <code>default</code> if
                   <code>permission_auto</code> is not configured) — <code>acceptEdits</code> and <code>yolo</code> are
                   forbidden in this mode and will be silently raised.
-                </div>
-              </Show>
+                </>}
+              </div>
+            </Show>
 
+            <Show when={sandboxMode() !== "off"}>
               <div class="form-field">
                 <label class="form-label" for="sandbox_extra_writable_paths">
                   Extra writable paths
@@ -246,7 +266,52 @@ export function IssueModal(props: IssueModalProps) {
                   rows="2"
                 />
               </div>
+              <div class="form-field">
+                <label class="form-label" for="sandbox_extra_read_only_paths">
+                  Extra read-only paths
+                </label>
+                <textarea
+                  id="sandbox_extra_read_only_paths"
+                  class="form-textarea"
+                  value={sandboxExtraReadOnlyPaths()}
+                  onInput={(e) => setSandboxExtraReadOnlyPaths(e.currentTarget.value)}
+                  placeholder="One path per line (optional)"
+                  rows="2"
+                />
+              </div>
+              <div class="form-field">
+                <label class="form-label" for="sandbox_extra_denied_paths">
+                  Extra denied paths
+                </label>
+                <textarea
+                  id="sandbox_extra_denied_paths"
+                  class="form-textarea"
+                  value={sandboxExtraDeniedPaths()}
+                  onInput={(e) => setSandboxExtraDeniedPaths(e.currentTarget.value)}
+                  placeholder="One path per line (optional)"
+                  rows="2"
+                />
+              </div>
             </Show>
+
+            <div class="form-field">
+              <label class="form-label" for="permission_mode_override">
+                Permission mode override
+              </label>
+              <select
+                id="permission_mode_override"
+                class="form-select"
+                value={permissionModeOverride()}
+                onChange={(e) => setPermissionModeOverride(e.currentTarget.value)}
+              >
+                <option value="">Workflow default</option>
+                <option value="default">Default</option>
+                <option value="auto">Auto</option>
+                <option value="manual">Manual</option>
+                <option value="acceptEdits">Accept Edits</option>
+                <option value="yolo">Yolo</option>
+              </select>
+            </div>
 
             <div class="form-field">
               <label class="form-label" for="labels">

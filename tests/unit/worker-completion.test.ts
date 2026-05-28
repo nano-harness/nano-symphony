@@ -54,4 +54,42 @@ describe("deriveCompletion", () => {
     expect(result.semantics).toBe("abandoned");
     expect(result.blockerFingerprint).toBe("sandbox denied");
   });
+
+  test("exit code mismatch downgrades success to needs_retry", () => {
+    const result = deriveCompletion(
+      { exitCode: 1, killedByTimeout: false, duration_ms: 10, agentResult: null, artifacts: {} },
+      { status: "success", reason: "all good" }
+    );
+    expect(result.semantics).toBe("needs_retry");
+    expect(result.summary).toContain("exited with code 1");
+    expect(result.blockerFingerprint).toBe("exitcode_mismatch:1");
+    expect(result.terminationCause).toBe("exitcode_mismatch");
+  });
+
+  test("exit code 0 with success payload is not downgraded", () => {
+    const result = deriveCompletion(
+      { exitCode: 0, killedByTimeout: false, duration_ms: 10, agentResult: null, artifacts: {} },
+      { status: "success", reason: "done" }
+    );
+    expect(result.semantics).toBe("success");
+    expect(result.terminationCause).toBeUndefined();
+  });
+
+  test("exit code null with success payload is not downgraded", () => {
+    const result = deriveCompletion(
+      { exitCode: null, killedByTimeout: false, duration_ms: 10, agentResult: null, artifacts: {} },
+      { status: "success", reason: "done" }
+    );
+    expect(result.semantics).toBe("success");
+  });
+
+  test("non-zero exit code with non-success payload is not affected", () => {
+    const result = deriveCompletion(
+      { exitCode: 1, killedByTimeout: false, duration_ms: 10, agentResult: null, artifacts: {} },
+      { status: "needs_retry", reason: "failed" }
+    );
+    expect(result.semantics).toBe("needs_retry");
+    // Should use normal path, not exitcode_mismatch
+    expect(result.terminationCause).toBeUndefined();
+  });
 });

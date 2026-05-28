@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { sql } from "./schema.ts";
+import sql from "./schema.sql" with { type: "text" };
 
 export function runMigrations(db: Database): void {
   db.exec(sql);
@@ -140,6 +140,87 @@ export function runMigrations(db: Database): void {
     const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "sandbox_extra_writable_paths")) {
       db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_writable_paths TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.sandbox_extra_read_only_paths (JSON-encoded string[])
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "sandbox_extra_read_only_paths")) {
+      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_read_only_paths TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.sandbox_extra_denied_paths (JSON-encoded string[])
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "sandbox_extra_denied_paths")) {
+      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_denied_paths TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issues.permission_mode_override
+  try {
+    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "permission_mode_override")) {
+      db.exec("ALTER TABLE issues ADD COLUMN permission_mode_override TEXT");
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: issue_comments table
+  try {
+    const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_comments'").all();
+    if (tables.length === 0) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS issue_comments (
+          id TEXT PRIMARY KEY,
+          issue_id TEXT NOT NULL,
+          ts INTEGER NOT NULL,
+          author TEXT NOT NULL DEFAULT 'operator',
+          body TEXT NOT NULL,
+          metadata_json TEXT,
+          FOREIGN KEY (issue_id) REFERENCES issues(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_issue_comments_issue_ts
+          ON issue_comments(issue_id, ts ASC);
+      `);
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2026-05: symphony_artifacts table
+  try {
+    const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='symphony_artifacts'").all();
+    if (tables.length === 0) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS symphony_artifacts (
+          id TEXT PRIMARY KEY,
+          issue_id TEXT NOT NULL,
+          attempt INTEGER NOT NULL,
+          source TEXT NOT NULL CHECK (source IN ('mcp', 'git_diff')),
+          kind TEXT NOT NULL,
+          label TEXT,
+          path TEXT,
+          content TEXT,
+          metadata_json TEXT,
+          storage_path TEXT,
+          content_size INTEGER DEFAULT 0,
+          mime_type TEXT DEFAULT 'application/octet-stream',
+          ts INTEGER NOT NULL,
+          FOREIGN KEY (issue_id) REFERENCES issues(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_symphony_artifacts_issue_attempt
+          ON symphony_artifacts(issue_id, attempt, ts ASC);
+      `);
     }
   } catch {
     // ignore

@@ -8,7 +8,19 @@ export function loadWorkflow(filePath: string): { workflow: Workflow; template: 
   const raw = readFileSync(filePath, "utf-8");
   const parsed = matter(raw);
   const workflow = WorkflowSchema.parse(parsed.data);
-  return { workflow, template: parsed.content };
+
+  // Validate that the template body references issue variables.
+  // Without these, the agent will never receive the issue content.
+  const content = parsed.content;
+  if (!content.includes("issue.title") && !content.includes("issue.description")) {
+    throw new Error(
+      `WORKFLOW.md template body does not reference {{ issue.title }} or {{ issue.description }}. ` +
+      `The agent will not receive the issue content. ` +
+      `Please check ${filePath} — it may have been overwritten with documentation.`
+    );
+  }
+
+  return { workflow, template: content };
 }
 
 export function watchWorkflow(

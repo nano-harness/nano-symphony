@@ -129,12 +129,4 @@ export async function runHook(hook: string, env: Record<string, string>, timeout
   }
 }
 
-export async function cleanupWorkspace(wsPath: string, managed: boolean): Promise<void> {
-  // The `managed` flag is the authority: it can only be true for paths produced
-  // by ensureWorkspace's managed branch, which already enforces containment via
-  // sanitizeIdentifier. A second assertContained here just blocked legitimate
-  // test fixtures (e.g. os.tmpdir() paths) without adding real safety.
-  if (!managed) return;
-  await fs.rm(wsPath, { recursive: true, force: true });
-}
 

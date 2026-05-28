@@ -72,16 +72,25 @@ export function createOrchestrator(
       ...retries.map((r) => ({ issueId: r.issue_id, attempt: r.next_attempt })),
       ...candidates
         .filter((c) => !retries.find((r) => r.issue_id === c.id))
-        .map((c) => ({ issueId: c.id, attempt: 0 })),
-    ];
+        .map((c) => {
+          const existingRun = tracker.getRun(c.id);
+          const attempt = existingRun ? existingRun.next_attempt + 1 : 0;
+          return { issueId: c.id, attempt };
+        }),
+    ].slice(0, slots);
 
-	    for (const { issueId, attempt } of toDispatch) {
-	      const ctx: WorkerContext = {
-	        tracker,
-	        workflow: wf,
-	        logger,
-	        mcpUrl,
-	      };
+    for (const { issueId, attempt } of toDispatch) {
+      // Claim issue before acquiring semaphore to prevent race conditions
+      // where multiple ticks could dispatch the same issue concurrently.
+      const claimed = tracker.claimIssue(issueId, attempt);
+      if (!claimed) continue; // Already claimed by another tick
+
+      const ctx: WorkerContext = {
+        tracker,
+        workflow: wf,
+        logger,
+        mcpUrl,
+      };
 
       void sem.acquire().then(() => {
         return runWorker(issueId, attempt, ctx).finally(() => sem.release());

@@ -1,197 +1,62 @@
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import type { Tracker } from "../db/tracker.ts";
 import { nullishString } from "../http/schemas.ts";
+import { guessMimeType } from "../orchestrator/artifact-collector.ts";
 
-export const TOOL_DEFINITIONS = [
-  {
-    name: "symphony.fetch_issue",
-    description: "Fetches the current issue details assigned to this agent session.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: "symphony.report_event",
-    description: "Reports a progress event to the orchestrator.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        kind: { type: "string", description: "Event kind (started, progress, tool_call, error, completed)" },
-        message: { type: "string", description: "Human-readable description" },
-        payload: { type: "object", description: "Additional structured data" },
-      },
-      required: ["kind", "message"],
-    },
-  },
-  {
-    name: "symphony.report_goal_state",
-    description: "Reports nano-agent /goal evaluator state for this session.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        condition: { type: "string", description: "Goal condition being evaluated" },
-        turns_evaluated: { type: "number", description: "Number of goal evaluation turns completed" },
-        max_turns: { type: "number", description: "Maximum allowed goal evaluation turns" },
-        achieved_at: { description: "Timestamp or turn marker when the goal was achieved" },
-        last_reason: { type: "string", description: "Most recent judge reason" },
-        tokens: { type: "object", description: "Optional token usage details" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "symphony.request_workflow_section",
-    description: "Gets the workflow template or a specific section.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        section: { type: "string", description: "Section name to extract (optional)" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "symphony.suggest_state_transition",
-    description: "Suggests a state change for the issue.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        suggested_state: { type: "string", description: "Target state" },
-        reason: { type: "string", description: "Reason for transition" },
-      },
-      required: ["suggested_state", "reason"],
-    },
-  },
-  {
-    name: "symphony.create_issue",
-    description: "Creates a new issue. Identifier is auto-generated as TASK-{n}. Default state is 'backlog' (not auto-dispatched). Optionally links the current issue as a blocker for sub-task scenarios.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Issue title (required)" },
-        description: { type: "string", description: "Issue description (markdown)" },
-        priority: { type: "string", enum: ["urgent", "high", "medium", "low"], description: "Priority, default 'medium'" },
-        state: { type: "string", description: "Initial state, default 'backlog'. Use a non-backlog state (e.g. 'todo') to make it immediately schedulable." },
-        labels: { type: "array", items: { type: "string" }, description: "Labels" },
-        link_current_as_blocker: { type: "boolean", description: "If true, the current issue is set as a blocker on the new issue (sub-task pattern). Default false." },
-      },
-      required: ["title"],
-    },
-  },
-  {
-    name: "symphony.activate_issue",
-    description: "Moves a backlog issue to a schedulable state so orchestrator picks it up. Use only when the new issue is ready to be worked on; call only when you intentionally want orchestrator to pick it up immediately.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        issue_id: { type: "string", description: "Target issue id (the one created by symphony.create_issue)" },
-        target_state: { type: "string", description: "Target state, default 'todo'. Must NOT be 'backlog'/'done'/'cancelled'." },
-      },
-      required: ["issue_id"],
-    },
-  },
-  {
-    name: "symphony.session_completed",
-    description: "REQUIRED - Must be called before session exits. Optionally attach typed artifacts, follow-up notes, and self-reported metrics so reviewers can act on the handoff without scrubbing logs.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        semantics: {
-          type: "string",
-          enum: ["success", "needs_retry", "handoff", "abandoned"],
-          description: "Completion semantics",
-        },
-        summary: { type: "string", description: "What happened in this session (markdown OK)" },
-        handoff_state: { type: "string", description: "Target state if semantics=handoff (e.g. 'in_review')" },
-        blocker_fingerprint: {
-          type: "string",
-          description: "Short stable identifier of the blocker, e.g. 'sandbox_denied:/abs/path' or 'dyld_missing:libpcre2'. Used by symphony to short-circuit same-cause retries."
-        },
-        termination_cause: {
-          type: "string",
-          description: "Closed-enum reason describing why the session ended. Typical values: task_done | natural_completion | error_threshold | diminishing_returns | similar_content_loop | context_done | goal_max_turns | llm_failure | crash."
-        },
-        artifacts: {
-          type: "array",
-          description:
-            "Typed artifacts for the reviewer. Each item is one of: " +
-            "{kind:'file_diff', path, diff?, additions?, deletions?} | " +
-            "{kind:'file_added', path, bytes?, preview?} | " +
-            "{kind:'file_removed', path} | " +
-            "{kind:'file_renamed', from, to} | " +
-            "{kind:'screenshot', path, caption?} | " +
-            "{kind:'log_excerpt', label, content} | " +
-            "{kind:'url', label, href} | " +
-            "{kind:'command_output', label, cmd, exit_code?, output} | " +
-            "{kind:'note', label, markdown}",
-          items: { type: "object" },
-          maxItems: 50,
-        },
-        follow_ups: {
-          type: "array",
-          description: "Plain-text follow-up items the reviewer should consider; surfaced as a list in the handoff panel.",
-          items: { type: "string", maxLength: 500 },
-          maxItems: 20,
-        },
-        metrics: {
-          type: "object",
-          description: "Optional self-reported metrics for the reviewer.",
-          properties: {
-            turns_used: { type: "number" },
-            files_touched: { type: "number" },
-            tests_passed: { type: "number" },
-            tests_failed: { type: "number" },
-          },
-        },
-      },
-      required: ["semantics", "summary"],
-    },
-  },
-];
+// ─── Zod Schemas (single source of truth) ───────────────────────────────────
+// All MCP tool input schemas are defined here as Zod schemas.
+// JSON-Schema for TOOL_DEFINITIONS is generated from these via zod-to-json-schema.
 
+const FetchIssueInputSchema = z.object({});
+
+/**
+ * Schema for report_event MCP tool.
+ * payload is freeform but the frontend recognizes these fields for markdown rendering:
+ *   - `markdown` (preferred), `text`, `summary`, `message`, `content`, `reason`
+ * If any of these fields contain a string, it will be rendered as GitHub Flavored Markdown.
+ */
 const ReportEventSchema = z.object({
-  kind: z.string(),
-  message: z.string(),
-  payload: z.unknown().optional(),
+  kind: z.string().describe("Event kind (started, progress, tool_call, error, completed)"),
+  message: z.string().describe("Human-readable description"),
+  payload: z.unknown().optional().describe("Additional structured data"),
 });
 
 const GoalStateSchema = z.object({
-  condition: z.string().optional(),
-  turns_evaluated: z.number().optional(),
+  condition: z.string().optional().describe("Goal condition being evaluated"),
+  turns_evaluated: z.number().optional().describe("Number of goal evaluation turns completed"),
   turnsEvaluated: z.number().optional(),
-  max_turns: z.number().optional(),
+  max_turns: z.number().optional().describe("Maximum allowed goal evaluation turns"),
   maxTurns: z.number().optional(),
-  achieved_at: z.union([z.string(), z.number(), z.null()]).optional(),
+  achieved_at: z.union([z.string(), z.number(), z.null()]).optional().describe("Timestamp or turn marker when the goal was achieved"),
   achievedAt: z.union([z.string(), z.number(), z.null()]).optional(),
-  last_reason: z.string().optional(),
+  last_reason: z.string().optional().describe("Most recent judge reason"),
   lastReason: z.string().optional(),
-  tokens: z.unknown().optional(),
+  tokens: z.unknown().optional().describe("Optional token usage details"),
 }).passthrough();
 
 const RequestWorkflowSectionSchema = z.object({
-  section: z.string().optional(),
+  section: z.string().optional().describe("Section name to extract (optional)"),
 });
 
 const SuggestStateTransitionSchema = z.object({
-  suggested_state: z.string(),
-  reason: z.string(),
+  suggested_state: z.string().describe("Target state"),
+  reason: z.string().describe("Reason for transition"),
 });
 
 const CreateIssueSchema = z.object({
-  title: z.string().min(1),
-  description: nullishString(),
-  priority: z.enum(["urgent", "high", "medium", "low"]).optional(),
-  state: nullishString(),
-  labels: z.array(z.string()).optional(),
-  link_current_as_blocker: z.boolean().optional(),
+  title: z.string().min(1).describe("Issue title (required)"),
+  description: nullishString().describe("Issue description (markdown)"),
+  priority: z.enum(["urgent", "high", "medium", "low"]).optional().describe("Priority, default 'medium'"),
+  state: nullishString().describe("Initial state, default 'backlog'. Use a non-backlog state (e.g. 'todo') to make it immediately schedulable."),
+  labels: z.array(z.string()).optional().describe("Labels"),
+  link_current_as_blocker: z.boolean().optional().describe("If true, the current issue is set as a blocker on the new issue (sub-task pattern). Default false."),
 });
 
 const ActivateIssueSchema = z.object({
-  issue_id: z.string().min(1),
-  target_state: nullishString(),
+  issue_id: z.string().min(1).describe("Target issue id (the one created by symphony.create_issue)"),
+  target_state: nullishString().describe("Target state, default 'todo'. Must NOT be 'backlog'/'done'/'cancelled'."),
 });
 
 const ArtifactSchema = z.discriminatedUnion("kind", [
@@ -207,20 +72,116 @@ const ArtifactSchema = z.discriminatedUnion("kind", [
 ]);
 
 const SessionCompletedSchema = z.object({
-  semantics: z.enum(["success", "needs_retry", "handoff", "abandoned"]),
-  summary: z.string(),
-  handoff_state: nullishString(),
-  blocker_fingerprint: z.string().optional(),
-  termination_cause: z.string().optional(),
-  artifacts: z.array(ArtifactSchema).max(50).optional(),
-  follow_ups: z.array(z.string().max(500)).max(20).optional(),
+  semantics: z.enum(["success", "needs_retry", "handoff", "abandoned"]).describe("Completion semantics"),
+  summary: z.string().describe("What happened in this session (markdown OK)"),
+  handoff_state: nullishString().describe("Target state if semantics=handoff (e.g. 'in_review')"),
+  blocker_fingerprint: z.string().optional().describe("Short stable identifier of the blocker, e.g. 'sandbox_denied:/abs/path' or 'dyld_missing:libpcre2'. Used by symphony to short-circuit same-cause retries."),
+  termination_cause: z.string().optional().describe("Closed-enum reason describing why the session ended. Typical values: task_done | natural_completion | error_threshold | diminishing_returns | similar_content_loop | context_done | goal_max_turns | llm_failure | crash."),
+  artifacts: z.array(ArtifactSchema).max(50).optional().describe(
+    "Typed artifacts for the reviewer. Each item is one of: " +
+    "{kind:'file_diff', path, diff?, additions?, deletions?} | " +
+    "{kind:'file_added', path, bytes?, preview?} | " +
+    "{kind:'file_removed', path} | " +
+    "{kind:'file_renamed', from, to} | " +
+    "{kind:'screenshot', path, caption?} | " +
+    "{kind:'log_excerpt', label, content} | " +
+    "{kind:'url', label, href} | " +
+    "{kind:'command_output', label, cmd, exit_code?, output} | " +
+    "{kind:'note', label, markdown}"
+  ),
+  follow_ups: z.array(z.string().max(500)).max(20).optional().describe("Plain-text follow-up items the reviewer should consider; surfaced as a list in the handoff panel."),
   metrics: z.object({
     turns_used: z.number().optional(),
     files_touched: z.number().optional(),
     tests_passed: z.number().optional(),
     tests_failed: z.number().optional(),
-  }).partial().optional(),
+  }).partial().optional().describe("Optional self-reported metrics for the reviewer."),
 });
+
+// States that agents must not transition to via suggest_state_transition;
+// they must go through session_completed which handles retry/fingerprint logic.
+const SUGGEST_TRANSITION_FORBIDDEN = new Set(["done", "cancelled"]);
+
+// ─── Helper: convert Zod → MCP-compatible JSON-Schema ────────────────────────
+function zodToInputSchema(schema: z.ZodType): Record<string, unknown> {
+  const jsonSchema = zodToJsonSchema(schema, { target: "openApi3" });
+  // Remove $schema and top-level metadata that MCP doesn't need
+  const { $schema, ...rest } = jsonSchema as Record<string, unknown>;
+  return rest;
+}
+
+// ─── TOOL_DEFINITIONS (generated from Zod schemas) ───────────────────────────
+export const TOOL_DEFINITIONS = [
+  {
+    name: "symphony.fetch_issue",
+    description: "Fetches the current issue details assigned to this agent session.",
+    inputSchema: zodToInputSchema(FetchIssueInputSchema),
+  },
+  {
+    name: "symphony.report_event",
+    description: "Reports a progress event to the orchestrator.",
+    inputSchema: zodToInputSchema(ReportEventSchema),
+  },
+  {
+    name: "symphony.report_goal_state",
+    description: "Reports nano-agent /goal evaluator state for this session.",
+    inputSchema: zodToInputSchema(GoalStateSchema),
+  },
+  {
+    name: "symphony.request_workflow_section",
+    description: "Gets the workflow template or a specific section.",
+    inputSchema: zodToInputSchema(RequestWorkflowSectionSchema),
+  },
+  {
+    name: "symphony.suggest_state_transition",
+    description: "Suggests a state change for the issue.",
+    inputSchema: zodToInputSchema(SuggestStateTransitionSchema),
+  },
+  {
+    name: "symphony.create_issue",
+    description: "Creates a new issue. Identifier is auto-generated as TASK-{n}. Default state is 'backlog' (not auto-dispatched). Optionally links the current issue as a blocker for sub-task scenarios.",
+    inputSchema: zodToInputSchema(CreateIssueSchema),
+  },
+  {
+    name: "symphony.activate_issue",
+    description: "Moves a backlog issue to a schedulable state so orchestrator picks it up. Use only when the new issue is ready to be worked on; call only when you intentionally want orchestrator to pick it up immediately.",
+    inputSchema: zodToInputSchema(ActivateIssueSchema),
+  },
+  {
+    name: "symphony.session_completed",
+    description: "REQUIRED - Must be called before session exits. Optionally attach typed artifacts, follow-up notes, and self-reported metrics so reviewers can act on the handoff without scrubbing logs.",
+    inputSchema: zodToInputSchema(SessionCompletedSchema),
+  },
+];
+
+// ─── Artifact helpers for session_completed persistence ─────────────────────
+type ArtifactItem = z.infer<typeof ArtifactSchema>;
+
+function buildArtifactLabel(art: ArtifactItem): string {
+  if ("label" in art && art.label) return art.label;
+  if ("path" in art && art.path) return art.path as string;
+  if ("to" in art) return `${art.from} → ${art.to}`;
+  if ("cmd" in art) return art.cmd;
+  if ("href" in art) return art.href;
+  return art.kind;
+}
+
+function extractArtifactContent(art: ArtifactItem): string | undefined {
+  if ("output" in art) return art.output;
+  if ("content" in art) return art.content;
+  if ("markdown" in art) return art.markdown;
+  if ("diff" in art && art.diff) return art.diff;
+  if ("preview" in art && art.preview) return art.preview;
+  return undefined;
+}
+
+function getArtifactPath(art: ArtifactItem): string | undefined {
+  // ArtifactSchema variants with a 'path' field: file_diff, file_added, file_removed, screenshot
+  // file_renamed has 'from'/'to' instead; use 'to' (the destination) as the canonical path
+  if ("path" in art && art.path) return art.path as string;
+  if ("to" in art) return art.to; // file_renamed
+  return undefined;
+}
 
 export async function handleTool(
   name: string,
@@ -269,11 +230,22 @@ export async function handleTool(
 
     case "symphony.suggest_state_transition": {
       const parsed = SuggestStateTransitionSchema.parse(params);
-      tracker.recordEvent(issueId, "state_transition_suggested", `Suggesting transition to ${parsed.suggested_state}`, {
-        suggested_state: parsed.suggested_state,
+      const target = parsed.suggested_state;
+      if (SUGGEST_TRANSITION_FORBIDDEN.has(target)) {
+        tracker.recordEvent(issueId, "state_transition_suggested", `Rejected transition to ${target} (use session_completed instead)`, {
+          suggested_state: target,
+          reason: parsed.reason,
+          rejected: true,
+        });
+        return { ok: false, error: `Cannot transition to '${target}' via suggest_state_transition; use session_completed instead.` };
+      }
+      tracker.updateIssueState(issueId, target);
+      tracker.recordEvent(issueId, "state_transition_suggested", `Transitioned to ${target}`, {
+        suggested_state: target,
         reason: parsed.reason,
+        applied: true,
       });
-      return { ok: true };
+      return { ok: true, state: target };
     }
 
     case "symphony.create_issue": {
@@ -324,7 +296,6 @@ export async function handleTool(
       const parsed = SessionCompletedSchema.parse(params);
       tracker.recordEvent(issueId, "session_completed", parsed.summary, {
         semantics: parsed.semantics,
-        summary: parsed.summary,
         handoff_state: parsed.handoff_state,
         blocker_fingerprint: parsed.blocker_fingerprint,
         termination_cause: parsed.termination_cause,
@@ -332,6 +303,30 @@ export async function handleTool(
         follow_ups: parsed.follow_ups,
         metrics: parsed.metrics,
       });
+
+      // Persist MCP-reported artifacts to DB (MCP data takes priority over git diff)
+      if (parsed.artifacts?.length) {
+        const seenPaths = new Set<string>();
+        for (const art of parsed.artifacts) {
+          const artPath = getArtifactPath(art);
+          // MCP-internal dedup: skip duplicate paths within this artifacts array
+          if (artPath) {
+            if (seenPaths.has(artPath)) continue;
+            seenPaths.add(artPath);
+          }
+          tracker.insertArtifact({
+            issue_id: issueId,
+            attempt,
+            source: "mcp",
+            kind: art.kind,
+            label: buildArtifactLabel(art),
+            path: artPath,
+            content: extractArtifactContent(art),
+            metadata: art,
+            mime_type: guessMimeType(art.kind, artPath),
+          });
+        }
+      }
 
       // Persist blocker_fingerprint to issues table for short-circuit logic
       if (parsed.blocker_fingerprint) {

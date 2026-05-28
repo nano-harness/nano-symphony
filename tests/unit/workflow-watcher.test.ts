@@ -17,13 +17,13 @@ describe("watchWorkflow", () => {
   test("reloads on file change", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-watch-"));
     const file = path.join(dir, "WORKFLOW.md");
-    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\nv1");
+    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\n{{ issue.title }} v1");
 
     const reloads: string[] = [];
     const watcher = watchWorkflow(file, (_wf, template) => reloads.push(template));
 
     await sleep(300);                       // let watcher attach
-    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\nv2");
+    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\n{{ issue.title }} v2");
     await sleep(1500);                      // awaitWriteFinish stability + polling + reload
 
     await watcher.close();
@@ -34,7 +34,7 @@ describe("watchWorkflow", () => {
   test("logs (does not swallow) parse / schema errors", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wf-watch-err-"));
     const file = path.join(dir, "WORKFLOW.md");
-    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\nok");
+    await fs.writeFile(file, "---\ntracker:\n  type: local\n---\n{{ issue.title }} ok");
 
     const errors: unknown[] = [];
     const logger = {
