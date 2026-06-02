@@ -40,6 +40,14 @@ export function createMcpRouter(
       if (!name) {
         return c.json({ jsonrpc: "2.0", id: body.id, error: { code: -32600, message: "Missing tool name" } });
       }
+      // S6: Enforce scope — only allow tools the token is authorized to call.
+      if (!auth.scope.has(name)) {
+        return c.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32603, message: `Tool '${name}' is not authorized for this token` },
+        });
+      }
       try {
         const wf = getWorkflow();
         const result = await handleTool(
@@ -65,7 +73,7 @@ export function createMcpRouter(
   });
 
   app.get("/sse", (c) => {
-    const token = c.req.header("X-Symphony-Token") ?? c.req.query("token");
+    const token = c.req.header("X-Symphony-Token");
     if (!token) return c.text("Unauthorized", 401);
     const auth = verifyToken(token);
     if (!auth) return c.text("Forbidden", 403);

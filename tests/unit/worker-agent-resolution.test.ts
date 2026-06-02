@@ -22,7 +22,7 @@ describe("worker resolves agent from issue overrides first", () => {
     const { tracker } = mkTracker();
     tracker.insertIssue({
       id: "ag-1", identifier: "AG-1", title: "t", state: "todo",
-      agent_kind: "claude-code", agent_binary: "/fake/claude-bin",
+      agent_kind: "claude-code",
     });
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-ag-"));
 
@@ -51,7 +51,8 @@ describe("worker resolves agent from issue overrides first", () => {
     });
 
     expect(observed.agentKind).toBe("claude-code");
-    expect(observed.binary).toBe("/fake/claude-bin");
+    // binary = agentConfig?.binary ?? kind_default. Workflow sets binary: "nano", so it wins.
+    expect(observed.binary).toBe("nano");
   });
 
   test("missing override falls back to workflow defaults", async () => {

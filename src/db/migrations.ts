@@ -2,6 +2,12 @@ import { Database } from "bun:sqlite";
 import sql from "./schema.sql" with { type: "text" };
 
 export function runMigrations(db: Database): void {
+  // A3: Enable WAL journal mode for better concurrency (multiple readers + one writer
+  // simultaneously) and set a generous busy_timeout so concurrent callers retry
+  // instead of throwing SQLITE_BUSY immediately.
+  db.exec("PRAGMA journal_mode=WAL");
+  db.exec("PRAGMA busy_timeout=5000");
+
   db.exec(sql);
 
   // Best-effort forward migrations for older sqlite files.
@@ -115,61 +121,35 @@ export function runMigrations(db: Database): void {
     // ignore
   }
 
-  // 2026-05: issues.agent_binary
+  // 2026-06: rebuild issues table — remove agent_binary, sandbox_mode,
+  // sandbox_extra_writable_paths, sandbox_extra_read_only_paths,
+  // sandbox_extra_denied_paths, permission_mode_override columns.
   try {
     const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "agent_binary")) {
-      db.exec("ALTER TABLE issues ADD COLUMN agent_binary TEXT");
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2026-05: issues.sandbox_mode
-  try {
-    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "sandbox_mode")) {
-      db.exec("ALTER TABLE issues ADD COLUMN sandbox_mode TEXT");
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2026-05: issues.sandbox_extra_writable_paths (JSON-encoded string[])
-  try {
-    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "sandbox_extra_writable_paths")) {
-      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_writable_paths TEXT");
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2026-05: issues.sandbox_extra_read_only_paths (JSON-encoded string[])
-  try {
-    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "sandbox_extra_read_only_paths")) {
-      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_read_only_paths TEXT");
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2026-05: issues.sandbox_extra_denied_paths (JSON-encoded string[])
-  try {
-    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "sandbox_extra_denied_paths")) {
-      db.exec("ALTER TABLE issues ADD COLUMN sandbox_extra_denied_paths TEXT");
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2026-05: issues.permission_mode_override
-  try {
-    const cols = db.query("PRAGMA table_info(issues)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "permission_mode_override")) {
-      db.exec("ALTER TABLE issues ADD COLUMN permission_mode_override TEXT");
+    if (cols.some((c) => c.name === "sandbox_mode" || c.name === "agent_binary")) {
+      db.exec(`
+        CREATE TABLE issues_new (
+          id TEXT PRIMARY KEY,
+          identifier TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          description TEXT,
+          priority TEXT NOT NULL DEFAULT 'medium',
+          state TEXT NOT NULL,
+          branch TEXT,
+          url TEXT,
+          workspace_path TEXT,
+          agent_kind TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_blocker_fingerprint TEXT
+        );
+        INSERT INTO issues_new (id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, created_at, updated_at, last_blocker_fingerprint)
+          SELECT id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, created_at, updated_at, last_blocker_fingerprint FROM issues;
+        DROP TABLE issues;
+        ALTER TABLE issues_new RENAME TO issues;
+        CREATE INDEX idx_issues_state ON issues(state);
+        CREATE INDEX idx_issues_identifier ON issues(identifier);
+      `);
     }
   } catch {
     // ignore
@@ -221,6 +201,17 @@ export function runMigrations(db: Database): void {
         CREATE INDEX IF NOT EXISTS idx_symphony_artifacts_issue_attempt
           ON symphony_artifacts(issue_id, attempt, ts ASC);
       `);
+    }
+  } catch {
+    // ignore
+  }
+
+  // S9: symphony_runs.agent_pid — stores the PID of the live agent subprocess so
+  // that a crash-restart can kill any orphaned agent processes.
+  try {
+    const cols = db.query("PRAGMA table_info(symphony_runs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "agent_pid")) {
+      db.exec("ALTER TABLE symphony_runs ADD COLUMN agent_pid INTEGER DEFAULT NULL");
     }
   } catch {
     // ignore

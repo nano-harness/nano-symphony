@@ -159,6 +159,8 @@ bun run dev
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `4123` | HTTP 服务端口。 |
+| `HOST` | `127.0.0.1` | 绑定地址。默认仅监听本地回环地址以确保安全。设置为 `0.0.0.0` 可对外暴露，但**使用非回环地址时必须设置 `API_TOKEN`**（否则 symphony 将拒绝启动）。 |
+| `API_TOKEN` | *(自动生成)* | 保护 `/api/v1/*` 的共享密钥。**始终强制启用** — 若未设置则自动生成随机 UUID，API 默认不开放访问。设置固定值可在重启后保持 Token 不变。请通过 `Authorization: ******` 或 `X-Symphony-Token: <your-token>` 请求头传递（EventSource 也可使用 `?token=` 查询参数）。Token 会注入到控制台页面以实现自动认证。 |
 | `DB_PATH` | `./symphony.db` | SQLite 数据库路径。 |
 | `WORKFLOW_PATH` | `./WORKFLOW.md` | 工作流 Markdown 文件路径。 |
 | `NANO_BIN` | `nano` | 默认 Agent 二进制。 |
@@ -167,6 +169,12 @@ bun run dev
 | `MAX_CONCURRENT_AGENTS` | `3` | 最大并发 Agent 运行数。 |
 | `MCP_TOKEN_TTL_MS` | `3600000` | MCP Token 有效期，单位毫秒。 |
 | `ORCHESTRATOR_TICK_MS` | `5000` | 编排器轮询间隔，单位毫秒。 |
+
+### 安全模型
+
+- **控制面认证**（`API_TOKEN`）：始终强制启用 — 所有发往 `/api/v1/*` 的请求（`/api/v1/health` 除外）必须通过 `Authorization` 或 `X-Symphony-Token` 请求头携带 Token。若未设置 `API_TOKEN`，启动时自动生成随机 UUID；设置固定值可在重启后保持 Token 不变。Token 比较使用恒定时间算法以防止时序攻击。Token 会以 `window.__SYMPHONY_API_TOKEN__` 的形式注入到控制台页面，实现内置控制台的自动认证。
+- **绑定地址**（`HOST`）：默认为 `127.0.0.1`（仅本地回环）。若 `HOST` 为非回环地址且未设置 `API_TOKEN`，symphony 将拒绝启动。
+- **子进程隔离**：Agent 子进程仅接收最小化的环境变量（`PATH`、`HOME`、区域设置变量等）—— symphony 自身的凭证和密钥不会转发给子进程。
 
 ## 沙箱
 
@@ -261,9 +269,62 @@ Attempt: {{ attempt }}
 | `PUT` | `/workflow` | 保存工作流文档。 |
 | `GET` | `/logs/:issueId/:attempt` | 使用 Server-Sent Events 流式输出尝试日志。 |
 
-## Agent MCP 工具
+## 工作区
 
-MCP 服务为被编排的 Agent 会话暴露以下 Symphony 工具：
+默认情况下，nano-symphony 为每个 Issue 在 `./workspaces/<identifier>` 下创建并管理独立工作区。运行完成或取消后，受管工作区会自动清理。
+
+### 使用自定义工作区
+
+对于需要与外部开发环境集成的 Issue，可在创建或更新 Issue 时指定自定义 `workspace_path`。Symphony 会直接使用该路径，不管理其生命周期。
+
+**使用场景：**
+
+1. **vwsd 挂载点**：将 symphony 指向一个跨会话持久存在的 vwsd 工作区：
+
+   ```bash
+   curl -X POST http://localhost:4123/api/v1/issues \
+     -H "Content-Type: application/json" \
+     -d '{
+       "identifier": "PROJ-42",
+       "title": "Implement feature X",
+       "state": "todo",
+       "workspace_path": "/Users/me/.vwsd/workspaces/my-project"
+     }'
+   ```
+
+2. **git worktree**：为 Agent 的修改使用专用的 git worktree：
+
+   ```bash
+   # 先创建 worktree
+   git worktree add ../worktrees/feature-branch feature-branch
+
+   # 然后创建指向它的 Issue
+   curl -X POST http://localhost:4123/api/v1/issues \
+     -H "Content-Type: application/json" \
+     -d '{
+       "identifier": "TASK-1",
+       "title": "Fix bug in feature-branch",
+       "state": "todo",
+       "workspace_path": "~/code/myproject/worktrees/feature-branch"
+     }'
+   ```
+
+**注意事项：**
+
+- 外部工作区**不会**被 symphony 删除，即使运行完成或取消。
+- 路径可以是绝对路径、相对路径，或使用 `~` 表示家目录。
+- 若路径不存在，symphony 会自动创建（mkdir -p）。
+- 将 `workspace_path` 设为空或 null 则使用默认受管工作区。
+- 控制台中的工作区标签会显示工作区是"受管"还是"外部"。
+
+### Handoff Review 中的 Diff
+
+Symphony 的 handoff 面板会渲染 Agent 对工作区所做修改的 unified diff。该功能需要工作区是一个 git 仓库：
+
+- **受管工作区**（默认 `./workspaces/<id>/`）：symphony 在首次声明时自动创建空的基准提交。可通过 `workspace.git_baseline: false` 禁用。
+- **外部工作区**（Issue 上设置了 `workspace_path`）：symphony 不会在您的路径上初始化 git。请确保该路径已经是一个 git worktree，或添加 `workspace.hooks.after_create` Hook 来执行 `git init && git add -A && git commit --allow-empty -m baseline`。
+
+## Agent MCP 工具
 
 - `symphony.fetch_issue`
 - `symphony.report_event`
@@ -328,6 +389,17 @@ RUN_REAL_AGENT_E2E=1 NANO_BIN_PATH=/path/to/nano bun test tests/e2e/e2e-real-san
 - 沙箱阻止在工作区外写入
 
 **注意：**这些测试需要一个支持沙箱功能的真实 nano-agent 二进制。
+
+## 故障排除
+
+### 改了 WORKFLOW.md 没生效
+
+1. 检查日志是否出现 `workflow reloaded` 或 `workflow reload failed`。
+2. macOS 上 v0.8+ 默认启用 polling，但若仍不生效可设置 `SYMPHONY_WATCH_USE_POLLING=1`。
+3. 通过 `PUT /api/v1/workflow` 接口写入后会同步触发重载，不依赖 watcher。
+4. 若出现 `workflow reload failed`，检查 YAML front matter 语法。
+
+详细机制参见 [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
 
 ## 许可证
 

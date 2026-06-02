@@ -82,6 +82,20 @@ export function createOrchestrator(
     for (const { issueId, attempt } of toDispatch) {
       // Claim issue before acquiring semaphore to prevent race conditions
       // where multiple ticks could dispatch the same issue concurrently.
+
+      // Check if this is a todo issue that needs to enter the planning phase first
+      const issueForDispatch = tracker.getIssue(issueId);
+      if (issueForDispatch && issueForDispatch.state === "todo") {
+        const planningConfig = wf.workflow.agent?.planning;
+        const planningEnabled = planningConfig?.enabled ?? false;
+        const skipLabels = planningConfig?.skip_labels ?? [];
+        const issueLabels = issueForDispatch.labels ?? [];
+        const hasSkipLabel = skipLabels.some((sl) => issueLabels.includes(sl));
+        if (planningEnabled && !hasSkipLabel) {
+          tracker.updateIssueState(issueId, "planning");
+        }
+      }
+
       const claimed = tracker.claimIssue(issueId, attempt);
       if (!claimed) continue; // Already claimed by another tick
 

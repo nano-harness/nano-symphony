@@ -146,4 +146,120 @@ describe("comments routes", () => {
 
     expect(res.status).toBe(400);
   });
+
+  describe("slash command directives", () => {
+    test("/approve on plan_review issue approves the plan", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/approve" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("in_progress");
+      expect(tracker.getLatestEventByKind("i1", "plan_approved")).toBeDefined();
+    });
+
+    test("/lgtm on plan_review issue approves the plan", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/lgtm" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("in_progress");
+    });
+
+    test("/execute on plan_review issue approves the plan", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/execute" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("in_progress");
+    });
+
+    test("/revise on plan_review issue sends plan back to planning with note", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/revise Step 3 needs rethinking" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("planning");
+      expect(tracker.getLatestEventByKind("i1", "plan_revision_requested")).toBeDefined();
+    });
+
+    test("/skip-plan on todo issue transitions to in_progress", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/skip-plan" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("in_progress");
+    });
+
+    test("/approve on non-plan_review issue is silently ignored", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "in_progress" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/approve" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("in_progress"); // Unchanged
+    });
+
+    test("/revise without note is silently ignored", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "/revise" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("plan_review"); // Unchanged
+    });
+
+    test("regular comment is not treated as a command", async () => {
+      const { app, tracker } = makeApp();
+      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+
+      const res = await app.request("/issues/i1/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "This looks great, but I have concerns about step 3" }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(tracker.getIssue("i1")!.state).toBe("plan_review"); // Unchanged
+    });
+  });
 });

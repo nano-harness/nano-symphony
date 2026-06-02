@@ -2,35 +2,13 @@ import type { Database } from "bun:sqlite";
 import type { Issue, IssueInput } from "./tracker-types.ts";
 
 export function hydrateIssueRow(base: Record<string, unknown>): Omit<Issue, "labels" | "blockers"> {
-  const row = base as Omit<Issue, "labels" | "blockers" | "sandbox_extra_writable_paths" | "sandbox_extra_read_only_paths" | "sandbox_extra_denied_paths"> & {
-    sandbox_extra_writable_paths: string | null;
-    sandbox_extra_read_only_paths: string | null;
-    sandbox_extra_denied_paths: string | null;
-  };
-  let writablePaths: string[] = [];
-  if (row.sandbox_extra_writable_paths) {
-    try { writablePaths = JSON.parse(row.sandbox_extra_writable_paths); } catch { /* ignore */ }
-  }
-  let readOnlyPaths: string[] = [];
-  if (row.sandbox_extra_read_only_paths) {
-    try { readOnlyPaths = JSON.parse(row.sandbox_extra_read_only_paths); } catch { /* ignore */ }
-  }
-  let deniedPaths: string[] = [];
-  if (row.sandbox_extra_denied_paths) {
-    try { deniedPaths = JSON.parse(row.sandbox_extra_denied_paths); } catch { /* ignore */ }
-  }
-  return {
-    ...row,
-    sandbox_extra_writable_paths: writablePaths,
-    sandbox_extra_read_only_paths: readOnlyPaths,
-    sandbox_extra_denied_paths: deniedPaths,
-  };
+  return base as Omit<Issue, "labels" | "blockers">;
 }
 
 export function createIssueOps(db: Database) {
   const insertIssueStmt = db.prepare(`
-    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, agent_binary, sandbox_mode, sandbox_extra_writable_paths, sandbox_extra_read_only_paths, sandbox_extra_denied_paths, permission_mode_override, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertLabelStmt = db.prepare(`
@@ -43,6 +21,10 @@ export function createIssueOps(db: Database) {
 
   const deleteIssueStmt = db.prepare(`
     DELETE FROM issues WHERE id = ?
+  `);
+
+  const getWorkspaceStmt = db.prepare(`
+    SELECT workspace_path, workspace_managed FROM symphony_runs WHERE issue_id = ?
   `);
 
   const deleteIssueRunStmt = db.prepare(`
@@ -112,7 +94,7 @@ export function createIssueOps(db: Database) {
     SELECT issues.*
     FROM issues
     LEFT JOIN symphony_runs ON issues.id = symphony_runs.issue_id
-    WHERE issues.state NOT IN ('done', 'cancelled', 'backlog')
+    WHERE issues.state NOT IN ('done', 'cancelled', 'backlog', 'plan_review')
       AND (
         symphony_runs.issue_id IS NULL
         OR (
@@ -172,12 +154,6 @@ export function createIssueOps(db: Database) {
       issue.url ?? null,
       issue.workspace_path ?? null,
       issue.agent_kind ?? null,
-      issue.agent_binary ?? null,
-      issue.sandbox_mode ?? null,
-      issue.sandbox_extra_writable_paths?.length ? JSON.stringify(issue.sandbox_extra_writable_paths) : null,
-      issue.sandbox_extra_read_only_paths?.length ? JSON.stringify(issue.sandbox_extra_read_only_paths) : null,
-      issue.sandbox_extra_denied_paths?.length ? JSON.stringify(issue.sandbox_extra_denied_paths) : null,
-      issue.permission_mode_override ?? null,
       (issue as { created_at?: string }).created_at ?? now,
       (issue as { updated_at?: string }).updated_at ?? now,
     );
@@ -221,16 +197,27 @@ export function createIssueOps(db: Database) {
     });
   }
 
-  function deleteIssue(id: string): boolean {
-    if (!getIssueBaseStmt.get(id)) return false;
-    deleteLabelStmt.run(id);
-    deleteIssueBlockersStmt.run(id, id);
-    deleteIssueEventsStmt.run(id);
-    deleteIssueCommentsStmt.run(id);
-    deleteIssueArtifactsStmt.run(id);
-    deleteIssueRunStmt.run(id);
-    deleteIssueStmt.run(id);
-    return true;
+  function deleteIssue(id: string): { deleted: boolean; workspace?: { path: string; managed: boolean } } {
+    if (!getIssueBaseStmt.get(id)) return { deleted: false };
+    // Read workspace info before the transaction deletes the run row
+    const wsRow = getWorkspaceStmt.get(id) as { workspace_path: string | null; workspace_managed: number | null } | null;
+    const workspace =
+      wsRow?.workspace_path
+        ? { path: wsRow.workspace_path, managed: wsRow.workspace_managed === 1 }
+        : undefined;
+    // A4: Wrap all 7-table delete in a single transaction to prevent orphaned
+    // rows if the process is interrupted mid-delete.
+    const deleteAll = db.transaction(() => {
+      deleteLabelStmt.run(id);
+      deleteIssueBlockersStmt.run(id, id);
+      deleteIssueEventsStmt.run(id);
+      deleteIssueCommentsStmt.run(id);
+      deleteIssueArtifactsStmt.run(id);
+      deleteIssueRunStmt.run(id);
+      deleteIssueStmt.run(id);
+    });
+    deleteAll();
+    return { deleted: true, workspace };
   }
 
   function updateLastBlockerFingerprint(issueId: string, fingerprint: string | null): void {

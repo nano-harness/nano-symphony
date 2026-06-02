@@ -2,14 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, cleanup, screen } from "@solidjs/testing-library";
 import { Router, Route } from "@solidjs/router";
 import { App, StatusBar } from "../App";
+import type { Issue } from "../api";
 
 // Mock the API module
 vi.mock("../api", () => ({
   api: {
     getRuns: vi.fn(async () => []),
     listIssues: vi.fn(async () => []),
-    createIssue: vi.fn(async (data: any) => ({ id: "x", ...data })),
-    updateIssue: vi.fn(async (_id: string, data: any) => ({ id: _id, ...data })),
+    createIssue: vi.fn(async (data: Partial<Issue>) => ({ id: "x", ...data })),
+    updateIssue: vi.fn(async (_id: string, data: Partial<Issue>) => ({ id: _id, ...data })),
     deleteIssue: vi.fn(async () => {}),
     streamEvents: vi.fn(() => ({
       addEventListener: vi.fn(),
@@ -34,7 +35,7 @@ class MockEventSource {
   addEventListener = vi.fn();
   close = vi.fn();
 }
-(globalThis as any).EventSource = MockEventSource;
+vi.stubGlobal("EventSource", MockEventSource);
 
 describe("App entry", () => {
   beforeEach(() => {

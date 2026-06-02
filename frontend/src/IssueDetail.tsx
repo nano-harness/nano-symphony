@@ -3,6 +3,7 @@ import { useParams, useNavigate, A } from "@solidjs/router";
 import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment } from "./api";
 import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
+import { PlanReviewPanel } from "./PlanReviewPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { EventBody } from "./EventBody";
 import { LogViewer } from "./LogViewer";
@@ -257,14 +258,16 @@ export function IssueDetail() {
                   <button class="btn btn-secondary" title="Retrigger with note" onClick={() => setShowRetriggerNote(true)}>
                     ↻+
                   </button>
-                  <button
-                    class="btn btn-secondary"
-                    onClick={() => setShowCancelConfirm(true)}
-                    disabled={run()?.last_state !== "claimed"}
-                    title={run()?.last_state === "claimed" ? "Cancel running agent" : "No active run to cancel"}
-                  >
-                    ⏹ Cancel
-                  </button>
+                  <Show when={issue()!.state !== "done" && issue()!.state !== "cancelled"}>
+                    <button
+                      class="btn btn-secondary"
+                      onClick={() => setShowCancelConfirm(true)}
+                      disabled={run()?.last_state !== "claimed"}
+                      title={run()?.last_state === "claimed" ? "Cancel running agent" : "No active run to cancel"}
+                    >
+                      ⏹ Cancel
+                    </button>
+                  </Show>
                   <button class="btn btn-secondary" onClick={() => setShowModal(true)}>
                     ✎ Edit
                   </button>
@@ -292,6 +295,12 @@ export function IssueDetail() {
             </Show>
 
             <HandoffPanel issueId={params.id} issueState={issue()!.state} />
+
+            <PlanReviewPanel
+              issueId={params.id}
+              issueState={issue()!.state}
+              onAction={() => { load(); }}
+            />
 
             <ArtifactsPanel issueId={params.id} maxAttempt={run()?.next_attempt ? run()!.next_attempt - 1 : 0} />
 
@@ -379,28 +388,6 @@ export function IssueDetail() {
               <div class="aside-label">Agent</div>
               <div class="aside-value">{AGENT_DISPLAY_NAMES[issue()!.agent_kind ?? ""] ?? issue()!.agent_kind ?? "workflow default"}</div>
             </div>
-            <Show when={issue()!.agent_binary}>
-              <div class="aside-field">
-                <div class="aside-label">Agent binary</div>
-                <div class="aside-value-mono">{issue()!.agent_binary}</div>
-              </div>
-            </Show>
-            <div class="aside-field">
-              <div class="aside-label">Sandbox</div>
-              <div class="aside-value">
-                {issue()!.sandbox_mode === "off"
-                  ? "Disabled (per-issue)"
-                  : "Default"}
-              </div>
-            </div>
-            <Show when={(issue()!.sandbox_extra_writable_paths ?? []).length > 0}>
-              <div class="aside-field">
-                <div class="aside-label">Extra writable</div>
-                <div class="aside-value-mono" style="font-size: 11px;">
-                  {(issue()!.sandbox_extra_writable_paths ?? []).map((p) => <div>{p}</div>)}
-                </div>
-              </div>
-            </Show>
             <Show when={run()}>
               <div class="aside-field">
                 <div class="aside-label">Attempt</div>

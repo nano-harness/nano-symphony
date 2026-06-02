@@ -157,7 +157,7 @@ install_symphony() {
     # Extract archive; exclude user-config files so they survive updates.
     # Fresh-install initialization happens in the guards below.
     log_info "Extracting archive to ${INSTALL_DIR}..."
-    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}" --exclude='WORKFLOW.md' --exclude='.env'
+    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}" --exclude='WORKFLOW.md' --exclude='.env' --exclude='*.db' --exclude='workspaces'
 
     # Install dependencies
     log_info "Installing dependencies with bun..."
@@ -170,6 +170,18 @@ install_symphony() {
     if [ ! -f "${INSTALL_DIR}/.env" ]; then
         log_info "Creating default .env configuration..."
         cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
+        # W1: Generate a stable random API_TOKEN so the CLI wrapper can authenticate
+        # and the server uses the same token across restarts instead of a new random
+        # UUID each time.
+        api_token="$(bun -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex'))")"
+        tmp_env="${INSTALL_DIR}/.env.tmp"
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            "API_TOKEN=") printf 'API_TOKEN=%s\n' "${api_token}" ;;
+            *) printf '%s\n' "$line" ;;
+          esac
+        done < "${INSTALL_DIR}/.env" > "$tmp_env" && mv "$tmp_env" "${INSTALL_DIR}/.env"
+        log_info "Generated API_TOKEN — run 'symphony token' to view it."
     else
         log_warn ".env already exists, skipping initialization"
     fi
@@ -193,6 +205,28 @@ install_symphony() {
 INSTALL_DIR="${INSTALL_DIR}"
 PORT="\${SYMPHONY_PORT:-\${PORT:-4123}}"
 API_BASE="http://localhost:\${PORT}/api/v1"
+
+# W2: Load API_TOKEN from .env so all curl calls are authenticated.
+# The server always enforces auth; without a token every request returns 401.
+if [ -f "\${INSTALL_DIR}/.env" ]; then
+  _api_token_entry="\$(grep -E '^API_TOKEN=' "\${INSTALL_DIR}/.env")"
+  if [ -n "\${_api_token_entry}" ]; then
+    # shellcheck disable=SC2046
+    export \$(printf '%s' "\${_api_token_entry}" | xargs) 2>/dev/null || true
+  fi
+  unset _api_token_entry
+fi
+# Allow caller to override via environment
+SYMPHONY_TOKEN="\${API_TOKEN:-\${SYMPHONY_TOKEN:-}}"
+
+# Helper: curl with optional auth header injected
+curl_api() {
+  if [ -n "\${SYMPHONY_TOKEN}" ]; then
+    curl -H "X-Symphony-Token: \${SYMPHONY_TOKEN}" "\$@"
+  else
+    curl "\$@"
+  fi
+}
 
 if [ ! -d "\${INSTALL_DIR}" ]; then
     echo "Error: nano-symphony is not installed at \${INSTALL_DIR}"
@@ -222,13 +256,14 @@ COMMANDS
   build              Build the frontend (cd frontend && bun run build).
   test               Run bun test. Exit 0 if all pass, 1 otherwise.
   lint               Run tsc --noEmit. Exit 0 if clean.
-  status             Probe http://localhost:\${PORT}/api/v1/runs. Exit 0 if up, 1 if down.
+  status             Probe http://localhost:\${PORT}/api/v1/health. Exit 0 if up, 1 if down.
+  token              Print the current API token (from .env or environment).
   update [version]   Read OSS metadata and update nano-symphony (default: latest).
   version            Print version (from \${INSTALL_DIR}/package.json).
   issue list [state] List issues (HTTP GET /api/v1/issues).
   issue get <id>     Get issue (HTTP GET /api/v1/issues/:id).
   issue create <title> [--priority=...] [--state=...]
-                     Create issue via HTTP POST /api/v1/issues.
+                     Create issue via HTTP POST /api/v1/issues. Default state: todo.
   help, --help, -h   Print this message.
 
 EXAMPLES
@@ -237,7 +272,7 @@ EXAMPLES
   symphony update
   symphony issue list todo
   symphony issue get <issue-id>
-  symphony issue create "Investigate flaky test" --priority=high --state=backlog
+  symphony issue create "Investigate flaky test" --priority=high --state=todo
 
 PATHS
   Install dir : \${INSTALL_DIR}
@@ -277,6 +312,9 @@ MCP TOOLS  (callable via JSON-RPC at /mcp with X-Symphony-Token header)
 ENVIRONMENT VARIABLES
   PORT                  4123       HTTP port
   SYMPHONY_PORT         4123       Wrapper HTTP port override
+  API_TOKEN             (required) Control-plane auth token. Read from \${INSTALL_DIR}/.env or
+                                   env. Use 'symphony token' to show the current value.
+  SYMPHONY_TOKEN                   Alias for API_TOKEN accepted by the wrapper.
   DB_PATH               ./symphony.db
   WORKFLOW_PATH         ./WORKFLOW.md
   NANO_BIN              nano       Default agent binary
@@ -295,7 +333,7 @@ HLP
 }
 
 next_identifier() {
-  curl -fsS "\${API_BASE}/issues" | bun -e '
+  curl_api -fsS "\${API_BASE}/issues" | bun -e '
 const chunks = [];
 for await (const chunk of Bun.stdin.stream()) chunks.push(chunk);
 const issues = JSON.parse(Buffer.concat(chunks).toString() || "[]");
@@ -323,10 +361,20 @@ case "\${1:-}" in
   test)    exec bun test ;;
   lint)    exec bun run lint ;;
   status)
-    if curl -fsS "\${API_BASE}/runs" >/dev/null 2>&1; then
+    # W2: Probe /health (auth-exempt) instead of /runs so status works without a token
+    # and also provides a reliable liveness signal even before any issues exist.
+    if curl -fsS "\${API_BASE}/health" >/dev/null 2>&1; then
       echo "symphony: running on :\${PORT}"; exit 0
     else
       echo "symphony: NOT running on :\${PORT}"; exit 1
+    fi ;;
+  token)
+    # W2: Print the token the wrapper is currently using so operators can copy it.
+    if [ -n "\${SYMPHONY_TOKEN}" ]; then
+      echo "\${SYMPHONY_TOKEN}"
+    else
+      echo "No API_TOKEN found. Set API_TOKEN in \${INSTALL_DIR}/.env or via environment."
+      exit 1
     fi ;;
   update)
     requested_version="\${2:-}"
@@ -378,18 +426,21 @@ case "\${1:-}" in
     case "\${sub}" in
       list)
         if [ "\${1:-}" ]; then
-          curl -fsS "\${API_BASE}/issues?state=\$1"
+          curl_api -fsS "\${API_BASE}/issues?state=\$1"
         else
-          curl -fsS "\${API_BASE}/issues"
+          curl_api -fsS "\${API_BASE}/issues"
         fi ;;
       get)
         [ "\${1:-}" ] || { issue_usage; exit 64; }
-        curl -fsS "\${API_BASE}/issues/\$1" ;;
+        curl_api -fsS "\${API_BASE}/issues/\$1" ;;
       create)
         [ "\${1:-}" ] || { issue_usage; exit 64; }
         title="\$1"; shift
         priority="medium"
-        state="backlog"
+        # W8: Default to 'todo' (not 'backlog') so issues are picked up by the
+        # orchestrator immediately.  'backlog' issues are filtered out by getCandidates
+        # (src/db/tracker-issues.ts) and will never be dispatched.
+        state="todo"
         while [ "\$#" -gt 0 ]; do
           case "\$1" in
             --priority=*) priority="\${1#--priority=}" ;;
@@ -404,7 +455,7 @@ case "\${1:-}" in
         priority_json="\$(json_string "\${priority}")"
         state_json="\$(json_string "\${state}")"
         identifier_json="\$(json_string "\${identifier}")"
-        curl -fsS -X POST "\${API_BASE}/issues" \
+        curl_api -fsS -X POST "\${API_BASE}/issues" \
           -H 'Content-Type: application/json' \
           -d "{\"identifier\":\${identifier_json},\"title\":\${title_json},\"priority\":\${priority_json},\"state\":\${state_json},\"labels\":[]}" ;;
       *) issue_usage; exit 64 ;;

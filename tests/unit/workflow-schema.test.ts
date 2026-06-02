@@ -1,50 +1,54 @@
 import { describe, expect, test } from "bun:test";
 import { WorkflowSchema } from "../../src/workflow/types.ts";
 
-describe("workflow schema - permission_auto passthrough", () => {
-  test("AcceptsNewFields", () => {
+describe("workflow schema - agent config", () => {
+  test("accepts valid agent config", () => {
     const parsed = WorkflowSchema.safeParse({
       tracker: { type: "local" },
       agent: {
-        permission_auto: {
-          backend: "llm",
-          confidence_threshold: 0.8,
-          timeout_seconds: 5,
-          cache_ttl_minutes: 30,
-          allow_rules: ["Bash(vwsd *)"],
-          denial_max_consecutive: 3,
-          denial_max_total: 20,
-        },
+        kind: "nano",
+        binary: "nano",
+        timeout_ms: 3600000,
+        max_retries: 3,
+        extra_env: { FOO: "bar" },
       },
     });
     expect(parsed.success).toBe(true);
-    expect(parsed.data?.agent?.permission_auto?.allow_rules).toEqual(["Bash(vwsd *)"]);
+    expect(parsed.data?.agent?.kind).toBe("nano");
+    expect(parsed.data?.agent?.extra_env).toEqual({ FOO: "bar" });
   });
 
-  test("Defaults", () => {
+  test("defaults to nano kind and 1h timeout", () => {
     const parsed = WorkflowSchema.parse({
       tracker: { type: "local" },
-      agent: { permission_auto: {} },
+      agent: {},
     });
-    expect(parsed.agent?.permission_auto?.allow_rules).toEqual([]);
-    expect(parsed.agent?.permission_auto?.denial_max_consecutive).toBe(0);
-    expect(parsed.agent?.permission_auto?.denial_max_total).toBe(0);
+    expect(parsed.agent?.kind).toBe("nano");
+    expect(parsed.agent?.timeout_ms).toBe(3600000);
+    expect(parsed.agent?.max_retries).toBe(3);
   });
 
-  test("StrictRejectsRemovedFields", () => {
+  test("silently ignores removed sandbox/permission fields", () => {
     const parsed = WorkflowSchema.safeParse({
       tracker: { type: "local" },
-      agent: { permission_auto: { trusted_binaries: ["vwsd"] } },
+      agent: {
+        sandbox: { backend: "native" },
+        permission_mode: "auto",
+        permission_auto: { allow_rules: [] },
+      },
     });
-    expect(parsed.success).toBe(false);
+    // Schema strips unknown fields (no .strict() on agent object)
+    expect(parsed.success).toBe(true);
+    expect((parsed.data?.agent as any)?.sandbox).toBeUndefined();
+    expect((parsed.data?.agent as any)?.permission_mode).toBeUndefined();
+    expect((parsed.data?.agent as any)?.permission_auto).toBeUndefined();
   });
 
-  test("StrictRejectsTypo", () => {
+  test("rejects invalid agent kind", () => {
     const parsed = WorkflowSchema.safeParse({
       tracker: { type: "local" },
-      agent: { permission_auto: { allowed_rules: ["Bash(vwsd *)"] } },
+      agent: { kind: "gpt-5" },
     });
     expect(parsed.success).toBe(false);
   });
 });
-

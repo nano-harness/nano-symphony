@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import type { SpawnContext } from "./types.ts";
 import type { AgentResultSummary, AgentArtifacts } from "./agent-result-payload.ts";
 import { getAdapter, type AgentKind } from "./agent-adapter.ts";
+import { stripSymphonyInternals } from "./env.ts";
 
 // Eagerly import adapters so they self-register
 import "./adapters/nano.ts";
@@ -22,26 +23,10 @@ export interface SpawnOptions {
   agentKind?: AgentKind;
   logger?: { warn: (obj: unknown, msg: string) => void };
   onStreamEvent?: (event: { kind: string; message: string; payload?: Record<string, unknown> }) => void;
-  sandboxConfig?: {
-    backend: "native" | "docker" | "none";
-    network_access: boolean;
-    extra_read_only_paths: string[];
-    extra_writable_paths: string[];
-    extra_denied_paths: string[];
-    docker_image?: string;
-    docker_runtime?: string;
-  };
-  permissionMode?: string;
-  permissionAuto?: {
-    backend: "llm" | "fail_closed";
-    model?: string;
-    confidence_threshold: number;
-    timeout_seconds: number;
-    cache_ttl_minutes: number;
-    allow_rules: string[];
-    denial_max_consecutive: number;
-    denial_max_total: number;
-  };
+  // S9: Called with the spawned process PID so the caller can persist it for crash-restart cleanup.
+  onPidAssigned?: (pid: number) => void;
+  /** Extra env vars forwarded verbatim to the agent process (from workflow agent.extra_env). */
+  extraEnv?: Record<string, string>;
 }
 
 export interface SpawnResult {
@@ -50,6 +35,8 @@ export interface SpawnResult {
   duration_ms: number;
   agentResult: AgentResultSummary | null;
   artifacts: AgentArtifacts;
+  // S10: True if stdout was truncated at the 32MB cap.
+  stdoutTruncated?: boolean;
 }
 
 // Exit codes aligned with nano-agent pkg/cli/binary.go:31-36
@@ -89,7 +76,7 @@ export function killAllAgents(): void {
 }
 
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, sandboxConfig, permissionMode, permissionAuto, logger, onStreamEvent } = opts;
+  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, logger, onStreamEvent, onPidAssigned } = opts;
   const agentKind: AgentKind = opts.agentKind ?? "nano";
   const adapter = getAdapter(agentKind);
 
@@ -106,19 +93,9 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     binary,
     timeoutMs,
     outputDir,
-    sandboxConfig,
-    permissionMode,
-    permissionAuto,
+    extraEnv: opts.extraEnv,
     logger,
   };
-
-  // Clean up conflicting config paths left by previous agent runs.
-  // The nano adapter writes to .nano/nano.yaml (subdirectory), but agents may have
-  // created .nano.yaml at root level with stale/invalid content from prior attempts.
-  const conflictPaths = [".nano.yaml", ".nano.yaml.bak", ".nano/state"];
-  for (const cp of conflictPaths) {
-    await fs.rm(path.join(workspace, cp), { recursive: true, force: true });
-  }
 
   // Write workspace files produced by the adapter
   const files = adapter.renderWorkspaceFiles(ctx);
@@ -135,9 +112,12 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Build spawn invocation from adapter
   const invocation = adapter.buildSpawnInvocation(ctx);
 
+  // Env: start from user's full environment minus symphony's own service credentials,
+  // then merge adapter-specific vars (MCP URL, token, etc.) and workflow extra_env.
   const env: Record<string, string> = {
-    ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v != null) as [string, string][]),
+    ...stripSymphonyInternals(process.env),
     ...invocation.env,
+    ...(opts.extraEnv ?? {}),
   };
 
   const startedAt = Date.now();
@@ -166,6 +146,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     killTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), SIGKILL_ESCALATION_MS);
   };
   activeProcesses.set(issueId, { proc, kill: killFn });
+  // S9: Notify caller of the PID so it can be persisted for crash-restart cleanup.
+  onPidAssigned?.(proc.pid);
 
   proc.stdin.write(prompt);
   proc.stdin.end();
@@ -177,8 +159,19 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const logStream = createWriteStream(logFile, { flags: "w" });
   logStream.write("--- log start ---\n");
 
-  // Capture stdout fully for result parsing
+  // Capture stdout for result parsing.
+  // A1: Cap head accumulation at 32MB to prevent OOM from runaway agents.
+  // Additionally keep a 1MB tail ring buffer so the final JSON result line (which
+  // appears at the very end of stdout) is always available even when the head is
+  // truncated.  Without the tail buffer a >32MB run would be misclassified as
+  // abandoned/no_result_payload because parseResult could not find the JSON line.
+  const STDOUT_BUFFER_LIMIT = 32 * 1024 * 1024; // 32MB head cap
+  const TAIL_BUFFER_LIMIT = 1 * 1024 * 1024;   // 1MB tail ring buffer
   const stdoutChunks: Uint8Array[] = [];
+  const tailChunks: Uint8Array[] = [];
+  let stdoutBytes = 0;
+  let tailBytes = 0;
+  let stdoutTruncated = false;
   const lineDecoder = new TextDecoder();
   let lineBuf = "";
 
@@ -188,7 +181,25 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        stdoutChunks.push(value);
+        // Head buffer: accumulate until the cap.
+        if (!stdoutTruncated) {
+          stdoutBytes += value.byteLength;
+          if (stdoutBytes > STDOUT_BUFFER_LIMIT) {
+            stdoutTruncated = true;
+          } else {
+            stdoutChunks.push(value);
+          }
+        }
+        // Tail ring buffer: always keep the most recent TAIL_BUFFER_LIMIT bytes so
+        // the final result JSON line is never dropped.
+        if (stdoutTruncated) {
+          tailChunks.push(value);
+          tailBytes += value.byteLength;
+          // Trim oldest tail chunks when over budget
+          while (tailBytes > TAIL_BUFFER_LIMIT && tailChunks.length > 1) {
+            tailBytes -= tailChunks.shift()!.byteLength;
+          }
+        }
         logStream.write(value);
 
         // Parse streaming lines for real-time events
@@ -228,7 +239,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   const timeoutHandle = setTimeout(() => {
     killedByTimeout = true;
-    proc.kill();
+    killFn(); // S3: kill entire process tree (same as cancel), not just the direct child
   }, timeoutMs);
 
   const exitCode = await proc.exited;
@@ -243,13 +254,25 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   logStream.end();
   await finished(logStream);
 
-  // Parse result from stdout
+  // Parse result from stdout: combine head buffer with tail ring buffer.
+  // When truncated, the tail contains the bytes most likely to hold the result JSON line.
   const decoder = new TextDecoder();
-  const stdoutText = stdoutChunks.map(c => decoder.decode(c, { stream: true })).join("") + decoder.decode();
+  let stdoutText: string;
+  if (stdoutTruncated && tailChunks.length > 0) {
+    const headText = stdoutChunks.map(c => decoder.decode(c, { stream: true })).join("") + decoder.decode();
+    // Reuse decoder (flushed above) for the tail chunks.
+    const tailText = tailChunks.map(c => decoder.decode(c, { stream: true })).join("") + decoder.decode();
+    // Combine: head + separator + tail.  parseResult scans from the end of the
+    // string, so placing the tail at the end guarantees the final result line
+    // is found even if it is not in the first 32MB.
+    stdoutText = headText + "\n" + tailText;
+  } else {
+    stdoutText = stdoutChunks.map(c => decoder.decode(c, { stream: true })).join("") + decoder.decode();
+  }
   const agentResult = adapter.parseResult(stdoutText);
 
   // Collect artifacts
   const artifacts = await adapter.collectArtifacts(ctx);
 
-  return { exitCode, killedByTimeout, duration_ms: Date.now() - startedAt, agentResult, artifacts };
+  return { exitCode, killedByTimeout, duration_ms: Date.now() - startedAt, agentResult, artifacts, stdoutTruncated };
 }

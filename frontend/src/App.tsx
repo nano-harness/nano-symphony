@@ -1,5 +1,5 @@
 import { Router, Route, A } from "@solidjs/router";
-import { createSignal, onMount, onCleanup } from "solid-js";
+import { createSignal, onMount, onCleanup, type ParentProps } from "solid-js";
 import { Dashboard } from "./Dashboard";
 import { IssueDetail } from "./IssueDetail";
 import { WorkflowEditor } from "./WorkflowEditor";
@@ -36,7 +36,7 @@ export function StatusBar() {
 }
 
 export function App() {
-  const Layout = (props: { children?: any }) => (
+  const Layout = (props: ParentProps) => (
     <>
       <StatusBar />
       {props.children}

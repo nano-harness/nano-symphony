@@ -479,6 +479,8 @@ body::after {
 .pill.done { border-color: var(--signal-green); color: var(--signal-green); }
 .pill.backlog { border-color: var(--mute-2); color: var(--mute-2); }
 .pill.cancelled { border-color: var(--signal-red); color: var(--signal-red); }
+.pill.planning { border-color: #d4a017; color: #d4a017; }
+.pill.plan_review { border-color: var(--signal-blue); color: var(--signal-blue); }
 
 .bar-priority {
   align-self: center;
@@ -1531,6 +1533,8 @@ a:hover {
 .board-col[data-state="done"]        .board-col-label { color: var(--signal-green); }
 .board-col[data-state="backlog"]     .board-col-label { color: var(--mute-2); }
 .board-col[data-state="cancelled"]   .board-col-label { color: var(--signal-red); }
+.board-col[data-state="planning"]    .board-col-label { color: #d4a017; }
+.board-col[data-state="plan_review"] .board-col-label { color: var(--signal-blue); }
 
 /* ═══ Comments ═══ */
 .comments-list {

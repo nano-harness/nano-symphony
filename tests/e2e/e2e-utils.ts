@@ -48,11 +48,11 @@ async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, tickMs = 1
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-function buildWorkflowMd(agentBinary: string, promptOverride?: string): string {
+function buildWorkflowMd(agentBinary: string, mockEnv: Record<string, string>, promptOverride?: string): string {
   const defaultPrompt = "{{ issue.title }}\\n\\nAttempt: {{ attempt }}\\n\\n{{ issue.description }}";
   const prompt = promptOverride ?? defaultPrompt;
 
-  return [
+  const lines = [
     "---",
     "tracker:",
     "  type: e2e",
@@ -60,13 +60,25 @@ function buildWorkflowMd(agentBinary: string, promptOverride?: string): string {
     `  binary: \"${agentBinary.replace(/\\/g, "\\\\")}\"`,
     "  timeout_ms: 10000",
     "  max_retries: 0",
+  ];
+
+  if (Object.keys(mockEnv).length > 0) {
+    lines.push("  extra_env:");
+    for (const [k, v] of Object.entries(mockEnv)) {
+      lines.push(`    ${k}: "${v}"`);
+    }
+  }
+
+  lines.push(
     "---",
     "",
     "# nano-symphony e2e WORKFLOW",
     "",
     prompt,
-    "",
-  ].join("\n");
+    ""
+  );
+
+  return lines.join("\n");
 }
 
 async function getFreePort(): Promise<number> {
@@ -91,8 +103,21 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
   const agentBinary = opts.realBinary ?? mockAgentPath;
 
   await fs.mkdir(workspacesRoot, { recursive: true });
-  await fs.writeFile(workflowPath, buildWorkflowMd(agentBinary, opts.promptOverride), "utf-8");
 
+  // Build mock env vars to inject into the agent process via agent.extra_env in the workflow YAML.
+  // (S3: the spawner's ENV_ALLOWLIST blocks server env vars from reaching child processes, so mock
+  // test vars must be passed explicitly through the workflow config instead.)
+  const mockEnv: Record<string, string> = {};
+  if (!opts.realBinary) {
+    mockEnv.MOCK_SEMANTICS = opts.mockSemantics ?? "success";
+    if (opts.mockSkipComplete) mockEnv.MOCK_SKIP_COMPLETE = "1";
+    if (opts.mockFailFetch) mockEnv.MOCK_FAIL_FETCH = "1";
+    if (opts.mockSleepSec != null) mockEnv.MOCK_SLEEP_BEFORE_COMPLETE = String(opts.mockSleepSec);
+  }
+
+  await fs.writeFile(workflowPath, buildWorkflowMd(agentBinary, mockEnv, opts.promptOverride), "utf-8");
+
+  const e2eApiToken = "e2e-test-api-token";
   const env: Record<string, string> = {
     ...process.env,
     PORT: String(port),
@@ -100,14 +125,11 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
     WORKSPACE_ROOT: workspacesRoot,
     WORKFLOW_PATH: workflowPath,
     NANO_BIN: agentBinary,
-    MOCK_SEMANTICS: opts.mockSemantics ?? "success",
+    // S1: Provide a stable token for e2e so all API calls can authenticate.
+    API_TOKEN: e2eApiToken,
   };
-  // Only set mock-specific env vars if using mock agent
-  if (!opts.realBinary) {
-    if (opts.mockSkipComplete) env.MOCK_SKIP_COMPLETE = "1";
-    if (opts.mockFailFetch) env.MOCK_FAIL_FETCH = "1";
-    if (opts.mockSleepSec != null) env.MOCK_SLEEP_BEFORE_COMPLETE = String(opts.mockSleepSec);
-  }
+
+  const authHeaders = { "X-Symphony-Token": e2eApiToken };
 
   // Use absolute path to bun to avoid PATH issues in CI/test environments
   const bunPath = Bun.which("bun") ?? process.execPath;
@@ -124,12 +146,12 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
   };
 
   try {
-    // Wait for server to start (with timeout)
+    // Wait for server to start (with timeout). Use /api/v1/health (auth-exempt) to detect readiness.
     await waitFor(async () => {
       try {
         const controller = new AbortController();
         const tid = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch(`${baseUrl}/api/v1/issues`, { signal: controller.signal }).finally(() => clearTimeout(tid));
+        const res = await fetch(`${baseUrl}/api/v1/health`, { signal: controller.signal }).finally(() => clearTimeout(tid));
         return res.ok;
       } catch {
         return false;
@@ -138,7 +160,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
 
     const issue = await fetchJson(`${baseUrl}/api/v1/issues`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({
         identifier: `E2E-${port}`,
         title: "E2E debug issue",
@@ -156,7 +178,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
     await waitFor(
       async () => {
         try {
-          const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`);
+          const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`, { headers: authHeaders });
           const state = String(run.last_state);
           return ["released", "in_review", "paused", "cancelled", "retry_queued"].includes(state);
         } catch {
@@ -166,8 +188,8 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
       (timeoutSec + 30) * 1000
     );
 
-    const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`);
-    const events = await fetchJson(`${baseUrl}/api/v1/events`);
+    const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`, { headers: authHeaders });
+    const events = await fetchJson(`${baseUrl}/api/v1/events`, { headers: authHeaders });
     const issueEvents = (events as any[]).filter((e) => e.issue_id === issueId);
 
     return { issueId, run, events: issueEvents, baseUrl, e2eRoot };

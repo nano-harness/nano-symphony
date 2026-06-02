@@ -68,9 +68,20 @@ export async function collectWorkspaceDiff(wsPath: string): Promise<WorkspaceDif
 async function runGit(cwd: string, args: string[]): Promise<string> {
   const proc = spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
   const timeoutHandle = setTimeout(() => proc.kill(), GIT_TIMEOUT_MS);
-  const out = await new Response(proc.stdout).text();
+  // Read both stdout and stderr concurrently to prevent pipe-buffer deadlocks,
+  // then check the exit code.
+  const [out, errOut] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   clearTimeout(timeoutHandle);
-  await proc.exited;
+  // A5: Check the exit code so callers get an observable error on git failure
+  // (e.g. timeout, non-existent ref, corrupt repo) rather than silently returning
+  // partial or empty output that the caller would misread as "no changes".
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`git ${args[0]} exited ${code}: ${errOut.slice(0, 200)}`);
+  }
   return out;
 }
 

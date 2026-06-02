@@ -125,4 +125,25 @@ describe("tracker", () => {
     const raw = db.query("SELECT last_blocker_fingerprint FROM issues WHERE id = ?").get("1") as { last_blocker_fingerprint: string };
     expect(raw.last_blocker_fingerprint).toBe("test_fingerprint");
   });
+
+  test("getCandidates excludes plan_review issues", () => {
+    tracker.insertIssue({ id: "1", identifier: "A-1", title: "Todo issue", state: "todo" });
+    tracker.insertIssue({ id: "2", identifier: "A-2", title: "Planning issue", state: "planning" });
+    tracker.insertIssue({ id: "3", identifier: "A-3", title: "Plan review issue", state: "plan_review" });
+    const candidates = tracker.getCandidates(10);
+    const ids = candidates.map((c) => c.id);
+    expect(ids).toContain("1");
+    expect(ids).toContain("2"); // planning IS a candidate
+    expect(ids).not.toContain("3"); // plan_review is NOT a candidate
+  });
+
+  test("getEventsByKind returns events of matching kind for issue", () => {
+    tracker.insertIssue({ id: "1", identifier: "A-1", title: "Issue", state: "planning" });
+    tracker.recordEvent("1", "plan_submitted", "Plan v1", { markdown: "# Plan 1", revision: 0 });
+    tracker.recordEvent("1", "progress", "Working", {});
+    tracker.recordEvent("1", "plan_submitted", "Plan v2", { markdown: "# Plan 2", revision: 1 });
+    const planEvents = tracker.getEventsByKind("1", "plan_submitted");
+    expect(planEvents.length).toBe(2);
+    expect(planEvents.every((e) => e.kind === "plan_submitted")).toBe(true);
+  });
 });

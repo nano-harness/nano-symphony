@@ -54,6 +54,11 @@ export function createRunOps(db: Database) {
     UPDATE symphony_runs SET last_patch = ? WHERE issue_id = ?
   `);
 
+  // S9: Track the agent PID in the DB so crash-restart can kill orphaned processes.
+  const updateAgentPidStmt = db.prepare(`
+    UPDATE symphony_runs SET agent_pid = ? WHERE issue_id = ?
+  `);
+
   function hydrateRun(r: Omit<SymphonyRun, "workspace_managed" | "current_attempt"> & { workspace_managed: number; current_attempt: number | null }): SymphonyRun {
     return { ...r, workspace_managed: r.workspace_managed === 1, current_attempt: r.current_attempt };
   }
@@ -115,6 +120,11 @@ export function createRunOps(db: Database) {
     recordPatchStmt.run(patch, issueId);
   }
 
+  // S9: Persist the live agent PID so crash-restart can identify and kill orphaned agents.
+  function updateAgentPid(issueId: string, pid: number | null): void {
+    updateAgentPidStmt.run(pid, issueId);
+  }
+
   return {
     claimIssue,
     releaseIssue,
@@ -127,5 +137,6 @@ export function createRunOps(db: Database) {
     updateWorkspacePath,
     markCurrentAttempt,
     recordPatch,
+    updateAgentPid,
   };
 }

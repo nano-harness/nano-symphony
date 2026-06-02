@@ -13,10 +13,17 @@ import { bus } from "../db/event_bus.ts";
 import type { SymphonyEvent, SymphonyRun } from "../db/tracker.ts";
 import type { RunPatch } from "../db/event_bus.ts";
 import { cancelAgent, getActiveProcessCount } from "../spawner/index.ts";
+import { removeWorkspace } from "../workspace/manager.ts";
 
 const IDENT_RE = /^[A-Z][A-Z0-9]*-\d+$/;
-const VALID_STATES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"] as const;
+const VALID_STATES = ["backlog", "todo", "planning", "plan_review", "in_progress", "in_review", "done", "cancelled"] as const;
 const AgentKindEnum = z.enum(["nano", "claude-code"]).nullable().optional();
+const AGENT_BINARIES: Record<string, string> = { nano: "nano", "claude-code": "claude" };
+
+// Slash command patterns for comment-based plan directives
+const CMD_APPROVE_RE = /^\/(?:approve|lgtm|execute)\b/i;
+const CMD_REVISE_RE = /^\/revise\s+/i;
+const CMD_SKIP_PLAN_RE = /^\/skip-plan\b/i;
 
 // SSE connection limit to prevent listener accumulation
 const MAX_SSE_CONNECTIONS = 50;
@@ -33,14 +40,8 @@ const IssueCreateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
-  agent_binary: nullishString({ max: 256 }),
-  sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
-  sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
-  sandbox_extra_read_only_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
-  sandbox_extra_denied_paths: z.array(z.string().min(1).max(1024)).max(32).default([]),
-  permission_mode_override: nullishString({ max: 64 }),
   labels: z.array(z.string()).default([]),
-});
+}).strict();
 
 const IssueUpdateSchema = z.object({
   title: z.string().min(1).max(200).optional(),
@@ -51,14 +52,12 @@ const IssueUpdateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
-  agent_binary: nullishString({ max: 256 }),
-  sandbox_mode: z.enum(["default", "off"]).nullable().optional(),
-  sandbox_extra_writable_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
-  sandbox_extra_read_only_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
-  sandbox_extra_denied_paths: z.array(z.string().min(1).max(1024)).max(32).optional(),
-  permission_mode_override: nullishString({ max: 64 }),
   labels: z.array(z.string()).optional(),
 }).strict(); // Reject unexpected fields like identifier or id
+
+const RequestChangesSchema = z.object({
+  note: z.string().trim().min(1, "note is required").max(8000),
+}).strict();
 
 export function createRoutes(
   tracker: Tracker,
@@ -78,6 +77,12 @@ export function createRoutes(
     ).length;
 
     const status = workflowLoaded ? "ok" : "degraded";
+
+    const available_agents: string[] = [];
+    for (const [kind, bin] of Object.entries(AGENT_BINARIES)) {
+      if (Bun.which(bin)) available_agents.push(kind);
+    }
+
     return c.json({
       status,
       orchestrator_running: true,
@@ -86,6 +91,7 @@ export function createRoutes(
       inflight_agents: inflightAgents,
       queue_depth: queueDepth,
       uptime_ms: Date.now() - startedAt,
+      available_agents,
     });
   });
 
@@ -128,9 +134,29 @@ export function createRoutes(
     return c.json(tracker.getIssue(existing.id));
   });
 
-  app.delete("/issues/:id", (c) => {
-    const ok = tracker.deleteIssue(c.req.param("id"));
-    if (!ok) return c.json({ error: "Not found" }, 404);
+  app.delete("/issues/:id", async (c) => {
+    const result = tracker.deleteIssue(c.req.param("id"));
+    if (!result.deleted) return c.json({ error: "Not found" }, 404);
+
+    if (result.workspace?.path) {
+      const workflow = _getWorkflow();
+      const hooks = workflow?.workflow.workspace?.hooks;
+      const hookEnv: Record<string, string> = {
+        SYMPHONY_ISSUE_ID: c.req.param("id"),
+        SYMPHONY_WORKSPACE: result.workspace.path,
+        SYMPHONY_WORKSPACE_MANAGED: result.workspace.managed ? "1" : "0",
+      };
+      const cleanup = await removeWorkspace(
+        result.workspace.path,
+        result.workspace.managed,
+        hooks ? { before_remove: hooks.before_remove } : undefined,
+        hookEnv,
+      );
+      if (!cleanup.removed) {
+        console.warn(`[delete-issue] workspace not removed: ${cleanup.reason}`);
+      }
+    }
+
     return c.json({ ok: true });
   });
 
@@ -352,10 +378,15 @@ export function createRoutes(
 
   // Handoff review endpoints
   app.get("/issues/:id/handoff", (c) => {
-    const events = tracker.getEvents();
-    const handoffEvent = events.filter((e) => e.issue_id === c.req.param("id") && e.kind === "handoff").sort((a, b) => b.ts - a.ts)[0];
+    const handoffEvent = tracker.getLatestEventByKind(c.req.param("id"), "handoff");
     if (!handoffEvent) return c.json({ error: "No handoff yet" }, 404);
     return c.json({ ...handoffEvent, payload: JSON.parse(handoffEvent.payload_json ?? "{}") });
+  });
+
+  app.get("/issues/:id/plan", (c) => {
+    const planEvent = tracker.getLatestEventByKind(c.req.param("id"), "plan_submitted");
+    if (!planEvent) return c.json({ error: "No plan submitted yet" }, 404);
+    return c.json({ ...planEvent, payload: JSON.parse(planEvent.payload_json ?? "{}") });
   });
 
   app.post("/issues/:id/approve", async (c) => {
@@ -369,13 +400,56 @@ export function createRoutes(
 
   app.post("/issues/:id/request-changes", async (c) => {
     const id = c.req.param("id");
-    const body = (await c.req.json()) as { note: string };
-    if (!body?.note?.trim()) return c.json({ error: "note is required" }, 400);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = RequestChangesSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, 400);
+    const { note } = parsed.data;
     tracker.updateIssueState(id, "todo");
     tracker.updateLastIssueState(id, "todo");
-    tracker.recordEvent(id, "revision_requested", body.note, { note: body.note });
+    tracker.recordEvent(id, "revision_requested", note, { note });
     triggerTick();
     return c.json({ ok: true });
+  });
+
+  app.post("/issues/:id/approve-plan", async (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    if (issue.state !== "plan_review") return c.json({ error: `Issue must be in 'plan_review' state (current: '${issue.state}')` }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { note?: string };
+    tracker.recordEvent(id, "plan_approved", body.note ?? "Plan approved by operator", { note: body.note });
+    tracker.updateIssueState(id, "in_progress");
+    tracker.updateLastIssueState(id, "");
+    const run = tracker.getRun(id);
+    if (run && run.last_state !== "released") {
+      tracker.releaseIssue(id, "released");
+    }
+    if (body.note?.trim()) {
+      tracker.addComment(id, { body: body.note, author: "operator" });
+      tracker.recordEvent(id, "comment_added", body.note.slice(0, 120), { author: "operator" });
+    }
+    triggerTick();
+    return c.json({ ok: true, state: "in_progress" });
+  });
+
+  app.post("/issues/:id/revise-plan", async (c) => {
+    const id = c.req.param("id");
+    const issue = tracker.getIssue(id);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    if (issue.state !== "plan_review") return c.json({ error: `Issue must be in 'plan_review' state (current: '${issue.state}')` }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { note?: string };
+    if (!body?.note?.trim()) return c.json({ error: "note is required" }, 400);
+    tracker.recordEvent(id, "plan_revision_requested", body.note, { note: body.note });
+    tracker.updateIssueState(id, "planning");
+    tracker.updateLastIssueState(id, "");
+    const run = tracker.getRun(id);
+    if (run && run.last_state !== "released") {
+      tracker.releaseIssue(id, "released");
+    }
+    tracker.addComment(id, { body: body.note, author: "operator" });
+    tracker.recordEvent(id, "comment_added", body.note.slice(0, 120), { author: "operator" });
+    triggerTick();
+    return c.json({ ok: true, state: "planning" });
   });
 
   app.post("/issues/:id/reveal-workspace", async (c) => {
@@ -392,13 +466,21 @@ export function createRoutes(
     if (!run?.workspace_path) return c.json({ error: "no workspace" }, 404);
     const rel = c.req.query("path") ?? "";
     const full = path.resolve(run.workspace_path, rel);
-    if (!full.startsWith(path.resolve(run.workspace_path) + path.sep)) {
-      return c.json({ error: "path escape denied" }, 403);
-    }
+    // S4: Resolve all symlinks before checking containment to prevent symlink escape.
     try {
-      const data = await fs.readFile(full);
+      const [realFull, realWorkspace] = await Promise.all([
+        fs.realpath(full),
+        fs.realpath(run.workspace_path),
+      ]);
+      if (!realFull.startsWith(realWorkspace + path.sep) && realFull !== realWorkspace) {
+        return c.json({ error: "path escape denied" }, 403);
+      }
+      const data = await fs.readFile(realFull);
       return new Response(data);
-    } catch {
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return c.json({ error: "file not found" }, 404);
+      if (code === "EACCES") return c.json({ error: "access denied" }, 403);
       return c.json({ error: "file not found" }, 404);
     }
   });
@@ -418,6 +500,43 @@ export function createRoutes(
     if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
     const comment = tracker.addComment(id, { body: parsed.data.body, author: parsed.data.author });
     tracker.recordEvent(id, "comment_added", parsed.data.body.slice(0, 120), { comment_id: comment.id, author: comment.author });
+
+    // Post-insert: parse slash commands from comment body
+    const bodyText = parsed.data.body.trim();
+    if (CMD_APPROVE_RE.test(bodyText)) {
+      // /approve, /lgtm, /execute → approve plan
+      if (issue.state === "plan_review") {
+        tracker.recordEvent(id, "plan_approved", "Plan approved via comment command", { command: bodyText.split(/\s/)[0], comment_id: comment.id });
+        tracker.updateIssueState(id, "in_progress");
+        tracker.updateLastIssueState(id, "");
+        const run = tracker.getRun(id);
+        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
+        triggerTick();
+      }
+    } else if (CMD_REVISE_RE.test(bodyText)) {
+      // /revise <content> → revise plan
+      const note = bodyText.replace(CMD_REVISE_RE, "").trim();
+      if (issue.state === "plan_review" && note) {
+        tracker.recordEvent(id, "plan_revision_requested", note, { note, comment_id: comment.id });
+        tracker.updateIssueState(id, "planning");
+        tracker.updateLastIssueState(id, "");
+        const run = tracker.getRun(id);
+        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
+        triggerTick();
+      }
+    } else if (CMD_SKIP_PLAN_RE.test(bodyText)) {
+      // /skip-plan → skip planning, go directly to in_progress
+      if (issue.state === "todo") {
+        tracker.updateIssueState(id, "in_progress");
+        tracker.updateLastIssueState(id, "");
+        const run = tracker.getRun(id);
+        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
+        tracker.recordEvent(id, "comment_added", "Planning phase skipped via /skip-plan command", { command: "/skip-plan", comment_id: comment.id });
+        triggerTick();
+      }
+    }
+    // Other comment bodies are silently treated as regular comments.
+
     return c.json(comment, 201);
   });
 
@@ -532,7 +651,12 @@ export function createRoutes(
     const artifact = tracker.getArtifact(c.req.param("id"));
     if (!artifact) return c.json({ error: "Not found" }, 404);
 
-    const disposition = `attachment; filename="${artifact.label ?? artifact.id}"`;
+    // S3: Sanitize label before embedding in Content-Disposition to prevent header injection.
+    // Strip CR/LF, double-quotes, and backslashes: in RFC 2616 quoted-strings a backslash
+    // is an escape prefix (quoted-pair), so an unstripped '\' followed by '"' would break
+    // out of the quoted-string boundary and allow header value injection.
+    const rawLabel = (artifact.label ?? artifact.id).replace(/[\r\n"\\]/g, "_");
+    const disposition = `attachment; filename="${rawLabel}"`;
 
     if (artifact.storage_path) {
       try {
@@ -557,23 +681,34 @@ export function createRoutes(
       });
     }
 
-    // Workspace fallback: resolve file from workspace if artifact has a path
+    // Workspace fallback: resolve file from workspace if artifact has a path.
+    // S2: Use fs.realpath to resolve all symlinks before containment check to
+    // prevent symlink-escape attacks (agent creates link -> /etc/passwd and
+    // reports it as an artifact path).
     if (artifact.path) {
       const run = tracker.getRun(artifact.issue_id);
       if (run?.workspace_path) {
-        const workspaceRoot = path.resolve(run.workspace_path);
-        const full = path.normalize(path.resolve(workspaceRoot, artifact.path));
-        // Path escape check
-        if (full === workspaceRoot || full.startsWith(workspaceRoot + path.sep)) {
-          try {
-            const data = await fs.readFile(full);
-            return new Response(data, {
-              headers: {
-                "Content-Type": artifact.mime_type,
-                "Content-Disposition": disposition,
-              },
-            });
-          } catch { /* fall through to 404 */ }
+        const full = path.resolve(run.workspace_path, artifact.path);
+        try {
+          const [realFull, realWorkspace] = await Promise.all([
+            fs.realpath(full),
+            fs.realpath(run.workspace_path),
+          ]);
+          if (realFull !== realWorkspace && !realFull.startsWith(realWorkspace + path.sep)) {
+            return c.json({ error: "path escape denied" }, 403);
+          }
+          const data = await fs.readFile(realFull);
+          return new Response(data, {
+            headers: {
+              "Content-Type": artifact.mime_type,
+              "Content-Disposition": disposition,
+            },
+          });
+        } catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || code === "ENOTDIR") return c.json({ error: "file not found" }, 404);
+          if (code === "EACCES") return c.json({ error: "access denied" }, 403);
+          /* fall through to 404 */
         }
       }
     }

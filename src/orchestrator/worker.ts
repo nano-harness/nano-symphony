@@ -2,10 +2,9 @@ import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
 import { ensureWorkspace, runHook } from "../workspace/manager.ts";
 import { renderPrompt } from "../prompt/renderer.ts";
-import { issueToken, revokeToken } from "../mcp/auth.ts";
+import { issueToken, revokeToken, AGENT_TOOL_SCOPE } from "../mcp/auth.ts";
 import { spawnAgent } from "../spawner/index.ts";
 import type { SpawnResult } from "../spawner/index.ts";
-import { getAdapter } from "../spawner/agent-adapter.ts";
 import { calculateBackoff } from "./backoff.ts";
 import { appendRunLog } from "./run_log.ts";
 import type { Logger } from "pino";
@@ -17,88 +16,6 @@ export interface WorkerContext {
   logger: Logger;
   mcpUrl: string;
   spawn?: typeof spawnAgent;
-}
-
-/**
- * Resolves sandbox config and permission mode from workflow + per-issue overrides.
- * Exported for unit testing. Called internally by runWorker.
- */
-export function resolveSandboxAndPermission(
-  agentKind: "nano" | "claude-code",
-  issue: {
-    sandbox_mode?: "default" | "off" | null;
-    sandbox_extra_writable_paths?: string[];
-    sandbox_extra_read_only_paths?: string[];
-    sandbox_extra_denied_paths?: string[];
-    permission_mode_override?: string | null;
-  },
-  agentConfig: Workflow["agent"] | undefined,
-): {
-  sandboxConfig: {
-    backend: "native" | "docker" | "none";
-    network_access: boolean;
-    extra_read_only_paths: string[];
-    extra_writable_paths: string[];
-    extra_denied_paths: string[];
-    docker_image?: string;
-    docker_runtime?: string;
-  };
-  permissionMode: string | undefined;
-  permissionFloored: { from: string; to: string } | null;
-} {
-  const perIssueOff = issue.sandbox_mode === "off";
-  const perIssueWritable = issue.sandbox_extra_writable_paths ?? [];
-  const perIssueReadOnly = issue.sandbox_extra_read_only_paths ?? [];
-  const perIssueDenied = issue.sandbox_extra_denied_paths ?? [];
-
-  const wfSandbox = agentConfig?.sandbox ?? {
-    backend: "native" as const,
-    network_access: true,
-    extra_read_only_paths: [] as string[],
-    extra_writable_paths: [] as string[],
-    extra_denied_paths: [] as string[],
-    docker_image: undefined as string | undefined,
-    docker_runtime: undefined as string | undefined,
-  };
-
-  const sandboxConfig = {
-    backend: perIssueOff ? ("none" as const) : wfSandbox.backend,
-    network_access: wfSandbox.network_access,
-    extra_read_only_paths: [
-      ...(wfSandbox.extra_read_only_paths ?? []),
-      ...perIssueReadOnly,
-    ],
-    extra_writable_paths: [
-      ...(wfSandbox.extra_writable_paths ?? []),
-      ...perIssueWritable,
-    ],
-    extra_denied_paths: [
-      ...(wfSandbox.extra_denied_paths ?? []),
-      ...perIssueDenied,
-    ],
-    docker_image: wfSandbox.docker_image,
-    docker_runtime: wfSandbox.docker_runtime,
-  };
-
-  // Resolve permission mode: per-issue override takes precedence over workflow config
-  const adapter = getAdapter(agentKind);
-  let resolvedPermissionMode: string | undefined = issue.permission_mode_override
-    ? issue.permission_mode_override
-    : (adapter.resolvePermissionMode
-        ? adapter.resolvePermissionMode(agentConfig)
-        : agentConfig?.permission_mode);
-
-  // Apply permission-mode floor via adapter hook (if available)
-  const sandboxOff = sandboxConfig.backend === "none";
-  let permissionFloored: { from: string; to: string } | null = null;
-
-  if (adapter.applyPermissionFloor) {
-    const result = adapter.applyPermissionFloor({ resolvedPermissionMode, sandboxOff, agentConfig });
-    resolvedPermissionMode = result.resolvedPermissionMode;
-    permissionFloored = result.floored;
-  }
-
-  return { sandboxConfig, permissionMode: resolvedPermissionMode, permissionFloored };
 }
 
 /**
@@ -274,12 +191,65 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
   let prompt: string;
   try {
-    const result = await renderPrompt(workflow.template, { issue, attempt }, {
-      goal: workflow.workflow.goal,
+    // Determine if we're in planning phase
+    const planningConfig = workflow.workflow.agent?.planning;
+    const isInPlanningPhase = issue.state === "planning";
+
+    // Choose template: use planning template if provided and in planning phase
+    const templateToUse = isInPlanningPhase && planningConfig?.template
+      ? planningConfig.template
+      : workflow.template;
+
+    const result = await renderPrompt(templateToUse, { issue, attempt }, {
+      goal: isInPlanningPhase ? undefined : workflow.workflow.goal,
       tracker,
       issueId,
     });
     prompt = result.text;
+
+    // Inject planning prompt prefix if in planning phase
+    if (isInPlanningPhase) {
+      const planningPrefix =
+        `You are in PLANNING mode. Your task is to analyze the issue and produce an ` +
+        `implementation plan. Do NOT write code or make changes.\n\n` +
+        `Output your plan by calling the \`symphony.submit_plan\` MCP tool.\n\n` +
+        `Your plan should include:\n` +
+        `- What files need to be created/modified\n` +
+        `- The approach and key design decisions\n` +
+        `- Step-by-step breakdown\n` +
+        `- Any risks or open questions\n\n`;
+      prompt = planningPrefix + prompt;
+
+      // Inject plan revision feedback if this is a revision
+      const revisionEvent = tracker.getLatestEventByKind(issueId, "plan_revision_requested");
+      const lastPlanEvent = tracker.getLatestEventByKind(issueId, "plan_submitted");
+      if (revisionEvent && (!lastPlanEvent || revisionEvent.ts > lastPlanEvent.ts)) {
+        const revPayload = JSON.parse(revisionEvent.payload_json ?? "{}") as { note?: string };
+        if (revPayload.note) {
+          prompt = `Operator requested plan revision:\n${revPayload.note}\n\nAddress this feedback in your revised plan.\n\n` + prompt;
+        }
+      }
+    }
+
+    // Inject approved plan into execution prompt if transitioning from plan_review
+    if (!isInPlanningPhase) {
+      const approvedPlanEvent = tracker.getLatestEventByKind(issueId, "plan_approved");
+      const latestPlanEvent = tracker.getLatestEventByKind(issueId, "plan_submitted");
+      if (approvedPlanEvent && latestPlanEvent) {
+        try {
+          const planPayload = JSON.parse(latestPlanEvent.payload_json ?? "{}") as { markdown?: string };
+          if (planPayload.markdown) {
+            const executionPrefix =
+              `## Approved Implementation Plan\n\n${planPayload.markdown}\n\n---\n\n` +
+              `Execute this plan. Follow the steps above. If you encounter issues that ` +
+              `require deviating from the plan, document the deviation.\n\n`;
+            prompt = executionPrefix + prompt;
+          }
+        } catch {
+          // ignore malformed plan payload
+        }
+      }
+    }
 
     // Record comments_injected event if comments were included
     if (result.meta.commentIds.length > 0) {
@@ -306,7 +276,18 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
     return;
   }
 
-  const token = issueToken(issueId, attempt);
+  // S6: Issue agent token scoped to reporting-only tools (AGENT_TOOL_SCOPE).
+  // S7: Extend TTL to cover the full agent timeout plus a 10-minute buffer so
+  //     tokens don't expire mid-session. Use config timeout as a fallback.
+  const isInPlanningPhase = issue.state === "planning";
+  const planningConfig = workflow.workflow.agent?.planning;
+  const DEFAULT_PLANNING_TIMEOUT_MS = 300_000; // 5 minutes for planning phase (shorter than execution)
+  const baseTimeoutMs = (workflow.workflow.agent?.timeout_ms ?? 3_600_000);
+  const timeoutMs = isInPlanningPhase
+    ? (planningConfig?.planning_timeout_ms ?? DEFAULT_PLANNING_TIMEOUT_MS)
+    : baseTimeoutMs;
+  const tokenTtlMs = timeoutMs + 10 * 60 * 1000; // timeout + 10min buffer
+  const token = issueToken(issueId, attempt, AGENT_TOOL_SCOPE, tokenTtlMs);
 
   // Mark current attempt before spawning agent so frontend can subscribe to correct log
   tracker.markCurrentAttempt(issueId, attempt);
@@ -318,35 +299,17 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
   });
 
   const agentConfig = workflow.workflow.agent;
-  const timeoutMs = agentConfig?.timeout_ms ?? 3_600_000;
   const agentKind: "nano" | "claude-code" =
     issue.agent_kind ?? agentConfig?.kind ?? "nano";
-  const kindDefault = agentKind === "claude-code" ? "claude" : "nano";
-  const binary =
-    issue.agent_binary ?? (issue.agent_kind === null || issue.agent_kind === undefined ? agentConfig?.binary : undefined) ?? kindDefault;
+  const AGENT_KIND_BINARY_DEFAULTS: Record<string, string> = { "claude-code": "claude", "nano": "nano" };
+  const binary = agentConfig?.binary ?? AGENT_KIND_BINARY_DEFAULTS[agentKind] ?? "nano";
 
   tracker.recordEvent(issueId, "started", `Attempt ${attempt} started`, {
     attempt,
     agent_kind: agentKind,
     agent_binary: binary,
-    agent_overridden: issue.agent_kind != null || issue.agent_binary != null,
+    agent_overridden: issue.agent_kind != null,
   });
-
-  // Per-issue overrides (sandbox_mode + sandbox_extra_writable_paths) are
-  // scoped to nano. Claude-code's per-issue UX is intentionally not in v0.7.
-  const { sandboxConfig, permissionMode: resolvedPermissionMode, permissionFloored } =
-    resolveSandboxAndPermission(agentKind, issue, agentConfig);
-
-  if (permissionFloored) {
-    tracker.recordEvent(issueId, "sandbox_permission_floor",
-      `sandbox=off forced permission_mode ${permissionFloored.from} -> ${permissionFloored.to}`,
-      { from: permissionFloored.from, to: permissionFloored.to });
-    logger.warn({ issueId, from: permissionFloored.from, to: permissionFloored.to },
-      "sandbox off: floored permission_mode");
-  }
-
-  const permissionMode = resolvedPermissionMode;
-  const permissionAuto = agentConfig?.permission_auto;
 
   let spawnResult: SpawnResult | null = null;
   try {
@@ -360,17 +323,22 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       binary,
       timeoutMs,
       agentKind,
-      sandboxConfig,
-      permissionMode,
-      permissionAuto,
+      extraEnv: agentConfig?.extra_env,
       logger,
       onStreamEvent: (ev) => {
         tracker.recordEvent(issueId, ev.kind, ev.message, ev.payload);
+      },
+      // S9: Persist the agent PID so crash-restart can kill orphaned processes.
+      onPidAssigned: (pid) => {
+        tracker.updateAgentPid(issueId, pid);
       },
     });
   } catch (err) {
     logger.error({ err, issueId }, "Agent spawn error");
     tracker.recordEvent(issueId, "error", `Agent error: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    // S9: Clear persisted PID — process has exited (or failed to start).
+    tracker.updateAgentPid(issueId, null);
   }
 
   const resultPayload: AgentResultSummary | null = spawnResult?.agentResult ?? null;
@@ -409,23 +377,37 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
   let blockerFingerprint = derivedFingerprint;
 
   // Override semantics from session_completed MCP tool call if present.
-  // This allows agents to express intent (e.g. "handoff") that isn't in the stdout schema.
-  const sessionCompletedEvent = tracker.getEvents()
-    .filter((e) => e.issue_id === issueId && e.kind === "session_completed")
-    .pop();
+  // S4: Before accepting the override, validate that it is consistent with the
+  // process outcome to prevent agents from claiming success after a non-zero exit.
+  // Neutral intents (handoff, needs_retry) are accepted unconditionally.
+  // Reporting success requires either a zero exit code or an absent exit code.
+  const sessionCompletedEvent = tracker.getLatestEventByKind(issueId, "session_completed");
   if (sessionCompletedEvent?.payload_json) {
     try {
       const scPayload = JSON.parse(sessionCompletedEvent.payload_json);
-	      if (scPayload.semantics) {
-	        semantics = scPayload.semantics;
-	        if (scPayload.blocker_fingerprint) {
-	          blockerFingerprint = scPayload.blocker_fingerprint;
-	        }
-	      }
-	    } catch {
-	      // ignore malformed payload
-	    }
-	  }
+      if (scPayload.semantics) {
+        const proposedSemantics: string = scPayload.semantics;
+        const exitCode = spawnResult?.exitCode ?? null;
+        const isNonZeroExit = exitCode !== null && exitCode !== 0;
+
+        // Reject "success" claim when process exited non-zero (agent crash/error).
+        if (proposedSemantics === "success" && isNonZeroExit) {
+          tracker.recordEvent(issueId, "semantics_override_rejected",
+            `session_completed claimed success but process exited with code ${exitCode}; using derived semantics`,
+            { proposed: proposedSemantics, derived: semantics, exit_code: exitCode, attempt }
+          );
+          // Keep derived semantics — do not apply the override.
+        } else {
+          semantics = proposedSemantics;
+          if (scPayload.blocker_fingerprint) {
+            blockerFingerprint = scPayload.blocker_fingerprint;
+          }
+        }
+      }
+    } catch {
+      // ignore malformed payload
+    }
+  }
 
 	  if (terminationCause === "no_result_payload") {
 	    tracker.recordEvent(issueId, "no_result_payload", summary ?? "no result payload", { attempt });
@@ -470,18 +452,7 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 	      { commands: resultPayload.blocked_commands_sample, attempt });
 	  }
 
-	  // Suggest disabling sandbox if this run was blocked by policy and sandbox is still on
-	  const blockerIndicatesSandbox = blockerFingerprint &&
-	    (blockerFingerprint.includes("sandbox_denied") ||
-	     blockerFingerprint.includes("blocked_by_policy") ||
-	     blockerFingerprint.includes("policy"));
-	  if (blockerIndicatesSandbox && issue.sandbox_mode !== "off") {
-	    tracker.recordEvent(issueId, "retrigger_suggestion",
-	      "Consider disabling sandbox for this issue (previous run was blocked by policy)",
-	      { reason: blockerFingerprint, suggestion: "sandbox_off", attempt });
-	  }
-
-  const retryConfig = workflow.workflow.retry;
+	  const retryConfig = workflow.workflow.retry;
   const base = retryConfig?.base_delay_ms ?? 5_000;
   const maxBackoff = retryConfig?.max_delay_ms ?? 300_000;
   const maxRetries = agentConfig?.max_retries ?? 3;

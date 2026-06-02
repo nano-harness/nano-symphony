@@ -31,7 +31,6 @@ export const EVENT_KINDS = {
 
   // Sandbox & permissions
   sandbox_observed: "Sandbox metadata recorded",
-  sandbox_permission_floor: "Permission mode floored due to sandbox=off",
   agent_blocked_commands: "Agent reported blocked commands",
   retrigger_suggestion: "Suggested configuration change before retrigger",
 
@@ -39,6 +38,11 @@ export const EVENT_KINDS = {
   retry_scheduled: "Retry scheduled with backoff",
   shortcircuit_same_cause: "Same blocker repeated, skipping retry",
   state_transition_suggested: "Agent suggested state change",
+
+  // Plan review lifecycle
+  plan_submitted: "Agent submitted implementation plan",
+  plan_approved: "Plan approved by operator",
+  plan_revision_requested: "Operator requested plan revision",
 
   // Operator actions
   retrigger_requested: "Operator requested retrigger",

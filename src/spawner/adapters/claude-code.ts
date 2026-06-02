@@ -1,6 +1,5 @@
 import { z } from "zod";
 import path from "path";
-import os from "os";
 import { AgentResultSummarySchema, parseLastJsonLine } from "../agent-result-payload.ts";
 import type { AgentResultSummary, AgentArtifacts } from "../agent-result-payload.ts";
 import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation } from "../agent-adapter.ts";
@@ -50,36 +49,8 @@ function renderMcpJson(ctx: SpawnContext): string {
   }, null, 2);
 }
 
-// Mirrors nano-agent SBPL's hard-deny list — keep both sides in sync.
-const CRITICAL_HOME_PATHS = [
-  ".ssh", ".aws", ".gnupg", ".kube",
-  ".config/gh", ".docker/config.json",
-];
-
-function renderClaudeSettings(ctx: SpawnContext): string {
-  const sb = ctx.sandboxConfig;
-  if (!sb || sb.backend === "none") {
-    return JSON.stringify({ sandbox: { enabled: false } }, null, 2);
-  }
-  const home = os.homedir();
-  const criticalAbs = CRITICAL_HOME_PATHS.map((p) => path.join(home, p));
-  // network_access: false → empty allowedDomains disables network.
-  // true → omit so claude-code's host default applies.
-  const networkBlock = sb.network_access
-    ? undefined
-    : { allowedDomains: [] as string[] };
-  return JSON.stringify({
-    sandbox: {
-      enabled: true,
-      ...(networkBlock ? { network: networkBlock } : {}),
-      filesystem: {
-        allowWrite: [...(sb.extra_writable_paths ?? [])],
-        denyWrite: [...criticalAbs, ...(sb.extra_denied_paths ?? [])],
-        denyRead: [...criticalAbs, ...(sb.extra_denied_paths ?? [])],
-        allowRead: sb.extra_read_only_paths ?? [],
-      },
-    },
-  }, null, 2);
+function renderClaudeSettings(): string {
+  return JSON.stringify({}, null, 2);
 }
 
 function renderSystemPromptAppend(): string {
@@ -94,7 +65,9 @@ export const claudeCodeAdapter: AgentAdapter = {
       {
         path: ".mcp.json",
         contents: renderMcpJson(ctx),
-        mode: 0o644,
+        // S1: Restrict to owner-only so adjacent users on a shared NFS workspace
+        // cannot read the per-session MCP token.
+        mode: 0o600,
       },
       {
         path: ".claude/append-system-prompt.md",
@@ -103,7 +76,7 @@ export const claudeCodeAdapter: AgentAdapter = {
       },
       {
         path: ".claude/settings.local.json",
-        contents: renderClaudeSettings(ctx),
+        contents: renderClaudeSettings(),
         mode: 0o644,
       },
     ];
@@ -118,7 +91,7 @@ export const claudeCodeAdapter: AgentAdapter = {
       "--append-system-prompt-file", path.join(ctx.workspace, ".claude", "append-system-prompt.md"),
       "--mcp-config", path.join(ctx.workspace, ".mcp.json"),
       "--allowedTools", "mcp__symphony__*",
-      "--permission-mode", (!ctx.sandboxConfig || ctx.sandboxConfig.backend === "none") ? "auto" : "acceptEdits",
+      "--permission-mode", "auto",
     ];
     const env: Record<string, string> = {
       SYMPHONY_TOKEN: ctx.token,

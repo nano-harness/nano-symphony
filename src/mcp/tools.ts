@@ -11,6 +11,10 @@ import { guessMimeType } from "../orchestrator/artifact-collector.ts";
 
 const FetchIssueInputSchema = z.object({});
 
+// Maximum serialized payload size for MCP report_event (prevents agent from
+// blowing up the SQLite events table with arbitrarily large payloads).
+const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024; // 64 KB
+
 /**
  * Schema for report_event MCP tool.
  * payload is freeform but the frontend recognizes these fields for markdown rendering:
@@ -20,7 +24,17 @@ const FetchIssueInputSchema = z.object({});
 const ReportEventSchema = z.object({
   kind: z.string().describe("Event kind (started, progress, tool_call, error, completed)"),
   message: z.string().describe("Human-readable description"),
-  payload: z.unknown().optional().describe("Additional structured data"),
+  payload: z.unknown().optional().describe("Additional structured data").superRefine((val, ctx) => {
+    // S7: Reject payloads that would exceed the per-event storage budget.
+    if (val === undefined || val === null) return;
+    const serialized = JSON.stringify(val);
+    if (serialized.length > MAX_EVENT_PAYLOAD_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `payload too large (${serialized.length} bytes > ${MAX_EVENT_PAYLOAD_BYTES} limit)`,
+      });
+    }
+  }),
 });
 
 const GoalStateSchema = z.object({
@@ -52,11 +66,34 @@ const CreateIssueSchema = z.object({
   state: nullishString().describe("Initial state, default 'backlog'. Use a non-backlog state (e.g. 'todo') to make it immediately schedulable."),
   labels: z.array(z.string()).optional().describe("Labels"),
   link_current_as_blocker: z.boolean().optional().describe("If true, the current issue is set as a blocker on the new issue (sub-task pattern). Default false."),
+  agent_kind: z.enum(["nano", "claude-code"]).optional()
+    .describe("Agent kind for this issue, default 'claude-code'."),
 });
 
 const ActivateIssueSchema = z.object({
   issue_id: z.string().min(1).describe("Target issue id (the one created by symphony.create_issue)"),
   target_state: nullishString().describe("Target state, default 'todo'. Must NOT be 'backlog'/'done'/'cancelled'."),
+});
+
+const MAX_PLAN_MARKDOWN_LENGTH = 32_000; // ~8x typical implementation plan size; keeps event payload manageable
+
+const SubmitPlanSchema = z.object({
+  markdown: z.string().min(1).max(MAX_PLAN_MARKDOWN_LENGTH)
+    .describe("Implementation plan in markdown format"),
+  steps: z.array(z.object({
+    id: z.string(),
+    title: z.string(),
+    description: z.string().optional(),
+    files: z.array(z.string()).optional(),
+    depends_on: z.array(z.string()).optional(),
+  })).max(30).optional()
+    .describe("Structured steps for progress tracking"),
+  estimates: z.object({
+    files_touched: z.number().optional(),
+    complexity: z.enum(["low", "medium", "high"]).optional(),
+    estimated_turns: z.number().optional(),
+  }).optional()
+    .describe("Effort estimates for the plan"),
 });
 
 const ArtifactSchema = z.discriminatedUnion("kind", [
@@ -102,6 +139,11 @@ const SessionCompletedSchema = z.object({
 // they must go through session_completed which handles retry/fingerprint logic.
 const SUGGEST_TRANSITION_FORBIDDEN = new Set(["done", "cancelled"]);
 
+// A6: Restrict agent-driven state transitions to the non-terminal working states.
+// "backlog" is excluded because issues there are never picked up by getCandidates;
+// "done"/"cancelled" are terminal and must flow through session_completed.
+const SUGGEST_TRANSITION_ALLOWED = new Set(["todo", "in_progress", "in_review", "planning"]);
+
 // ─── Helper: convert Zod → MCP-compatible JSON-Schema ────────────────────────
 function zodToInputSchema(schema: z.ZodType): Record<string, unknown> {
   const jsonSchema = zodToJsonSchema(schema, { target: "openApi3" });
@@ -146,6 +188,11 @@ export const TOOL_DEFINITIONS = [
     name: "symphony.activate_issue",
     description: "Moves a backlog issue to a schedulable state so orchestrator picks it up. Use only when the new issue is ready to be worked on; call only when you intentionally want orchestrator to pick it up immediately.",
     inputSchema: zodToInputSchema(ActivateIssueSchema),
+  },
+  {
+    name: "symphony.submit_plan",
+    description: "Submits an implementation plan during the PLANNING phase. Transitions the issue from 'planning' to 'plan_review' and releases the agent slot. Must be called instead of session_completed when in planning mode.",
+    inputSchema: zodToInputSchema(SubmitPlanSchema),
   },
   {
     name: "symphony.session_completed",
@@ -221,7 +268,9 @@ export async function handleTool(
       const parsed = RequestWorkflowSectionSchema.parse(params);
       const template = workflow?.template ?? "";
       if (parsed.section) {
-        const regex = new RegExp(`##\\s+${parsed.section}([\\s\\S]*?)(?=##|$)`, "i");
+        // S2: Escape regex metacharacters in agent-supplied section name to prevent ReDoS.
+        const safeSection = parsed.section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(`##\\s+${safeSection}([\\s\\S]*?)(?=##|$)`, "i");
         const match = regex.exec(template);
         return { content: match ? match[1].trim() : "" };
       }
@@ -238,6 +287,15 @@ export async function handleTool(
           rejected: true,
         });
         return { ok: false, error: `Cannot transition to '${target}' via suggest_state_transition; use session_completed instead.` };
+      }
+      // A6: Only allow transitions to the known safe working states.
+      if (!SUGGEST_TRANSITION_ALLOWED.has(target)) {
+        tracker.recordEvent(issueId, "state_transition_suggested", `Rejected transition to unknown/disallowed state '${target}'`, {
+          suggested_state: target,
+          reason: parsed.reason,
+          rejected: true,
+        });
+        return { ok: false, error: `Cannot transition to '${target}' via suggest_state_transition; allowed states are: ${[...SUGGEST_TRANSITION_ALLOWED].join(", ")}.` };
       }
       tracker.updateIssueState(issueId, target);
       tracker.recordEvent(issueId, "state_transition_suggested", `Transitioned to ${target}`, {
@@ -262,6 +320,7 @@ export async function handleTool(
         priority: parsed.priority ?? "medium",
         state,
         labels: parsed.labels ?? [],
+        agent_kind: parsed.agent_kind ?? "claude-code",
       });
       if (parsed.link_current_as_blocker) {
         const current = tracker.getIssue(issueId);
@@ -292,8 +351,57 @@ export async function handleTool(
       return { ok: true, id: parsed.issue_id, state: target };
     }
 
+    case "symphony.submit_plan": {
+      const parsed = SubmitPlanSchema.parse(params);
+      const issue = tracker.getIssue(issueId);
+      if (!issue) throw new Error(`Issue ${issueId} not found`);
+      if (issue.state !== "planning") {
+        return { ok: false, error: `submit_plan requires issue to be in 'planning' state (current: '${issue.state}')` };
+      }
+
+      // Determine revision number from prior plan_submitted events
+      const priorPlans = tracker.getEventsByKind(issueId, "plan_submitted");
+      const revision = priorPlans.length;
+
+      const planPayload = {
+        markdown: parsed.markdown,
+        steps: parsed.steps,
+        estimates: parsed.estimates,
+        revision,
+      };
+
+      tracker.recordEvent(issueId, "plan_submitted", `Implementation plan submitted (revision ${revision})`, planPayload);
+      tracker.updateIssueState(issueId, "plan_review");
+      tracker.releaseIssue(issueId, "released");
+      tracker.updateLastIssueState(issueId, "plan_review");
+      return { ok: true, message: "Plan submitted. Awaiting operator approval." };
+    }
+
     case "symphony.session_completed": {
       const parsed = SessionCompletedSchema.parse(params);
+
+      // If the issue is in 'planning' state and agent calls handoff, treat as plan submission.
+      // The agent is expected to call submit_plan instead, but this is a fallback.
+      const currentIssue = tracker.getIssue(issueId);
+      if (currentIssue?.state === "planning" && parsed.semantics === "handoff") {
+        // Auto-submit an empty plan from the session summary
+        const priorPlans = tracker.getEventsByKind(issueId, "plan_submitted");
+        const revision = priorPlans.length;
+        tracker.recordEvent(issueId, "plan_submitted", `Plan submitted via session_completed handoff (revision ${revision})`, {
+          markdown: parsed.summary,
+          revision,
+        });
+        tracker.updateIssueState(issueId, "plan_review");
+        tracker.releaseIssue(issueId, "released");
+        tracker.updateLastIssueState(issueId, "plan_review");
+        // Also record session_completed for log completeness
+        tracker.recordEvent(issueId, "session_completed", parsed.summary, {
+          semantics: parsed.semantics,
+          planning_phase: true,
+        });
+        return { ok: true };
+      }
+
       tracker.recordEvent(issueId, "session_completed", parsed.summary, {
         semantics: parsed.semantics,
         handoff_state: parsed.handoff_state,

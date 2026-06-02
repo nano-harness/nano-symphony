@@ -114,10 +114,26 @@ export async function ensureWorkspace(
   return { path: wsPath, managed: true };
 }
 
+// S1: Minimal env allowlist for hook execution — mirrors spawner's ENV_ALLOWLIST.
+// Never forward symphony's full process.env (which may contain API keys, tokens, etc.)
+// into hook subprocesses. Callers pass in the explicit vars they need via `env`.
+const HOOK_ENV_ALLOWLIST = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM",
+  "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+  "TMPDIR", "TEMP", "TMP",
+  "TZ",
+];
+
 export async function runHook(hook: string, env: Record<string, string>, timeoutMs = 30000): Promise<void> {
   if (!hook.trim()) return;
+  const parentEnv = Object.fromEntries(
+    HOOK_ENV_ALLOWLIST.flatMap((key) => {
+      const val = process.env[key];
+      return val != null ? [[key, val]] : [];
+    })
+  );
   const proc = Bun.spawn(["sh", "-c", hook], {
-    env: { ...process.env, ...env } as Record<string, string>,
+    env: { ...parentEnv, ...env } as Record<string, string>,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -129,4 +145,44 @@ export async function runHook(hook: string, env: Record<string, string>, timeout
   }
 }
 
+export async function removeWorkspace(
+  wsPath: string,
+  managed: boolean,
+  hooks?: { before_remove?: string },
+  hookEnv?: Record<string, string>,
+): Promise<{ removed: boolean; reason?: string }> {
+  // Unmanaged workspaces (user-provided paths) are never deleted by symphony
+  if (!managed) {
+    return { removed: false, reason: "unmanaged workspace, skipped" };
+  }
 
+  // Path safety check — prevent traversal outside WORKSPACE_ROOT
+  try {
+    assertContained(config.WORKSPACE_ROOT, wsPath);
+  } catch {
+    return { removed: false, reason: "path outside workspace root" };
+  }
+
+  // Check directory exists before attempting removal
+  try {
+    await fs.stat(wsPath);
+  } catch {
+    return { removed: false, reason: "not found" };
+  }
+
+  // Trigger before_remove hook if configured
+  if (hooks?.before_remove) {
+    try {
+      await runHook(hooks.before_remove, hookEnv ?? {});
+    } catch (err) {
+      console.warn(`[workspace] before_remove hook failed: ${err}`);
+    }
+  }
+
+  try {
+    await fs.rm(wsPath, { recursive: true, force: true });
+  } catch (err) {
+    return { removed: false, reason: `deletion failed: ${err}` };
+  }
+  return { removed: true };
+}

@@ -30,6 +30,19 @@ export const AgentArtifactsSchema = z.object({
 });
 export type AgentArtifacts = z.infer<typeof AgentArtifactsSchema>;
 
+// S8: Sanitize a parsed JSON value to remove prototype-pollution keys before
+// passing to schema validation. Handles nested objects recursively.
+const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function sanitizeProto(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sanitizeProto);
+  const clean = Object.create(null) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (!PROTO_KEYS.has(k)) clean[k] = sanitizeProto(v);
+  }
+  return clean;
+}
+
 /**
  * Parses a JSON line from a text blob (scanning from end), validating against the given Zod schema.
  * Used by adapters to extract structured result from agent stdout.
@@ -46,7 +59,7 @@ export function parseLastJsonLine<T>(text: string, schema: ZodSchema<T>): T | nu
 
   // 1. Try parsing the entire text first (covers single JSON blob output)
   try {
-    const json = JSON.parse(trimmed);
+    const json = sanitizeProto(JSON.parse(trimmed));
     const parsed = schema.safeParse(json);
     if (parsed.success) return parsed.data;
   } catch {
@@ -59,7 +72,7 @@ export function parseLastJsonLine<T>(text: string, schema: ZodSchema<T>): T | nu
     const line = lines[i].trim();
     if (!line) continue;
     try {
-      const json = JSON.parse(line);
+      const json = sanitizeProto(JSON.parse(line));
       const parsed = schema.safeParse(json);
       if (parsed.success) return parsed.data;
     } catch { continue; }

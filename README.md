@@ -170,6 +170,8 @@ Runtime configuration is read from environment variables and validated at startu
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `4123` | HTTP server port. |
+| `HOST` | `127.0.0.1` | Bind address. Defaults to loopback-only for security. Set to `0.0.0.0` to expose externally, but **`API_TOKEN` must be set** when using a non-loopback address (symphony refuses to start without it). |
+| `API_TOKEN` | *(auto-generated)* | Shared secret protecting `/api/v1/*`. **Always enforced** — a random UUID is auto-generated if unset, so the API is never open by default. Set an explicit value to keep the token stable across restarts. Provide as `Authorization: ******` or `X-Symphony-Token: <your-token>` header (or `?token=` query param for EventSource). The token is injected into the served dashboard for automatic auth. |
 | `DB_PATH` | `./symphony.db` | SQLite database path. |
 | `WORKFLOW_PATH` | `./WORKFLOW.md` | Workflow Markdown file path. |
 | `NANO_BIN` | `nano` | Default agent binary. |
@@ -178,6 +180,12 @@ Runtime configuration is read from environment variables and validated at startu
 | `MAX_CONCURRENT_AGENTS` | `3` | Maximum concurrent agent runs. |
 | `MCP_TOKEN_TTL_MS` | `3600000` | MCP token time-to-live in milliseconds. |
 | `ORCHESTRATOR_TICK_MS` | `5000` | Orchestrator polling interval in milliseconds. |
+
+### Security model
+
+- **Control plane auth** (`API_TOKEN`): Always enforced — every request to `/api/v1/*` (except `/api/v1/health`) must include the token via `Authorization` or `X-Symphony-Token` header. A random UUID is auto-generated at startup if `API_TOKEN` is unset; set it explicitly to keep the same token across restarts. Comparison is constant-time to prevent timing attacks. The token is injected as `window.__SYMPHONY_API_TOKEN__` into the served HTML so that the built-in dashboard authenticates automatically.
+- **Bind address** (`HOST`): Defaults to `127.0.0.1` (loopback only). Symphony refuses to start if `HOST` is a non-loopback address and `API_TOKEN` is unset.
+- **Child process isolation**: Agent subprocesses receive only a minimal environment (`PATH`, `HOME`, locale variables, etc.) — symphony's own credentials and secrets are never forwarded.
 
 ## Sandbox
 

@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, createResource, For, Show } from "solid-js";
 import { api, type Issue } from "./api";
 
 interface IssueModalProps {
@@ -7,7 +7,14 @@ interface IssueModalProps {
   onSave: () => void;
 }
 
+const AGENT_DISPLAY_NAMES: Record<string, string> = {
+  nano: "Nano",
+  "claude-code": "Claude Code",
+};
+
 export function IssueModal(props: IssueModalProps) {
+  const [health] = createResource(() => api.getHealth());
+  const availableAgents = () => health()?.available_agents ?? [];
   const isEdit = () => !!props.issue;
   const [title, setTitle] = createSignal(props.issue?.title || "");
   const [description, setDescription] = createSignal(props.issue?.description || "");
@@ -16,20 +23,6 @@ export function IssueModal(props: IssueModalProps) {
   const [labels, setLabels] = createSignal((props.issue?.labels || []).join(", "));
   const [workspacePath, setWorkspacePath] = createSignal(props.issue?.workspace_path || "");
   const [agentKind, setAgentKind] = createSignal<string>(props.issue?.agent_kind ?? "");
-  const [agentBinary, setAgentBinary] = createSignal(props.issue?.agent_binary ?? "");
-  const [sandboxMode, setSandboxMode] = createSignal<string>(props.issue?.sandbox_mode ?? "");
-  const [sandboxExtraWritablePaths, setSandboxExtraWritablePaths] = createSignal(
-    (props.issue?.sandbox_extra_writable_paths || []).join("\n")
-  );
-  const [sandboxExtraReadOnlyPaths, setSandboxExtraReadOnlyPaths] = createSignal(
-    (props.issue?.sandbox_extra_read_only_paths || []).join("\n")
-  );
-  const [sandboxExtraDeniedPaths, setSandboxExtraDeniedPaths] = createSignal(
-    (props.issue?.sandbox_extra_denied_paths || []).join("\n")
-  );
-  const [permissionModeOverride, setPermissionModeOverride] = createSignal<string>(
-    props.issue?.permission_mode_override ?? ""
-  );
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [touched, setTouched] = createSignal({ title: false });
@@ -58,21 +51,6 @@ export function IssueModal(props: IssueModalProps) {
         state: state(),
         workspace_path: workspacePath().trim() || undefined,
         agent_kind: agentKind() === "" ? null : (agentKind() as "nano" | "claude-code"),
-        agent_binary: agentBinary().trim() || null,
-        sandbox_mode: sandboxMode() === "" ? null : (sandboxMode() as "default" | "off"),
-        sandbox_extra_writable_paths: sandboxExtraWritablePaths()
-          .split("\n")
-          .map((p) => p.trim())
-          .filter((p) => p),
-        sandbox_extra_read_only_paths: sandboxExtraReadOnlyPaths()
-          .split("\n")
-          .map((p) => p.trim())
-          .filter((p) => p),
-        sandbox_extra_denied_paths: sandboxExtraDeniedPaths()
-          .split("\n")
-          .map((p) => p.trim())
-          .filter((p) => p),
-        permission_mode_override: permissionModeOverride().trim() || null,
         labels: labels()
           .split(",")
           .map((l) => l.trim())
@@ -198,119 +176,15 @@ export function IssueModal(props: IssueModalProps) {
                   onChange={(e) => setAgentKind(e.currentTarget.value)}
                 >
                   <option value="">Workflow default</option>
-                  <option value="nano">Nano</option>
-                  <option value="claude-code">Claude Code</option>
+                  <For each={availableAgents()}>
+                    {(kind) => (
+                      <option value={kind}>
+                        {AGENT_DISPLAY_NAMES[kind] ?? kind}
+                      </option>
+                    )}
+                  </For>
                 </select>
               </div>
-
-              <div class="form-field">
-                <label class="form-label" for="agent_binary">
-                  Agent binary
-                </label>
-                <input
-                  id="agent_binary"
-                  type="text"
-                  class="form-input"
-                  value={agentBinary()}
-                  onInput={(e) => setAgentBinary(e.currentTarget.value)}
-                  placeholder="Default (auto)"
-                />
-              </div>
-            </div>
-
-            <Show when={agentKind() === "claude-code" && sandboxMode() !== "off"}>
-              <div class="form-hint" style="color: var(--mute); margin-bottom: 8px;">
-                Claude Code sandbox 通过 <code>.claude/settings.local.json</code> 配置。
-              </div>
-            </Show>
-
-            <div class="form-row">
-              <div class="form-field">
-                <label class="form-label" for="sandbox_mode">
-                  Sandbox
-                </label>
-                <select
-                  id="sandbox_mode"
-                  class="form-select"
-                  value={sandboxMode()}
-                  onChange={(e) => setSandboxMode(e.currentTarget.value)}
-                >
-                  <option value="">Default</option>
-                  <option value="off">Disabled</option>
-                </select>
-              </div>
-            </div>
-
-            <Show when={sandboxMode() === "off"}>
-              <div class="form-hint" style="color: var(--color-error, #cc3333); margin-bottom: 8px;">
-                <strong>⚠ Sandbox disabled.</strong> Filesystem and network isolation are off for this issue.
-                {agentKind() !== "claude-code" && <>
-                  {" "}The worker will floor <code>permission_mode</code> to <code>auto</code> (or <code>default</code> if
-                  <code>permission_auto</code> is not configured) — <code>acceptEdits</code> and <code>yolo</code> are
-                  forbidden in this mode and will be silently raised.
-                </>}
-              </div>
-            </Show>
-
-            <Show when={sandboxMode() !== "off"}>
-              <div class="form-field">
-                <label class="form-label" for="sandbox_extra_writable_paths">
-                  Extra writable paths
-                </label>
-                <textarea
-                  id="sandbox_extra_writable_paths"
-                  class="form-textarea"
-                  value={sandboxExtraWritablePaths()}
-                  onInput={(e) => setSandboxExtraWritablePaths(e.currentTarget.value)}
-                  placeholder="One path per line (optional)"
-                  rows="2"
-                />
-              </div>
-              <div class="form-field">
-                <label class="form-label" for="sandbox_extra_read_only_paths">
-                  Extra read-only paths
-                </label>
-                <textarea
-                  id="sandbox_extra_read_only_paths"
-                  class="form-textarea"
-                  value={sandboxExtraReadOnlyPaths()}
-                  onInput={(e) => setSandboxExtraReadOnlyPaths(e.currentTarget.value)}
-                  placeholder="One path per line (optional)"
-                  rows="2"
-                />
-              </div>
-              <div class="form-field">
-                <label class="form-label" for="sandbox_extra_denied_paths">
-                  Extra denied paths
-                </label>
-                <textarea
-                  id="sandbox_extra_denied_paths"
-                  class="form-textarea"
-                  value={sandboxExtraDeniedPaths()}
-                  onInput={(e) => setSandboxExtraDeniedPaths(e.currentTarget.value)}
-                  placeholder="One path per line (optional)"
-                  rows="2"
-                />
-              </div>
-            </Show>
-
-            <div class="form-field">
-              <label class="form-label" for="permission_mode_override">
-                Permission mode override
-              </label>
-              <select
-                id="permission_mode_override"
-                class="form-select"
-                value={permissionModeOverride()}
-                onChange={(e) => setPermissionModeOverride(e.currentTarget.value)}
-              >
-                <option value="">Workflow default</option>
-                <option value="default">Default</option>
-                <option value="auto">Auto</option>
-                <option value="manual">Manual</option>
-                <option value="acceptEdits">Accept Edits</option>
-                <option value="yolo">Yolo</option>
-              </select>
             </div>
 
             <div class="form-field">

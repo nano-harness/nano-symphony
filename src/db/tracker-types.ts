@@ -9,12 +9,6 @@ export interface Issue {
   url: string | null;
   workspace_path: string | null;
   agent_kind: "nano" | "claude-code" | null;
-  agent_binary: string | null;
-  sandbox_mode: "default" | "off" | null;
-  sandbox_extra_writable_paths: string[];
-  sandbox_extra_read_only_paths: string[];
-  sandbox_extra_denied_paths: string[];
-  permission_mode_override: string | null;
   created_at: string;
   updated_at: string;
   labels: string[];
@@ -32,12 +26,6 @@ export interface IssueInput {
   url?: string | null;
   workspace_path?: string | null;
   agent_kind?: "nano" | "claude-code" | null;
-  agent_binary?: string | null;
-  sandbox_mode?: "default" | "off" | null;
-  sandbox_extra_writable_paths?: string[];
-  sandbox_extra_read_only_paths?: string[];
-  sandbox_extra_denied_paths?: string[];
-  permission_mode_override?: string | null;
   labels?: string[];
 }
 
@@ -56,6 +44,8 @@ export interface SymphonyRun {
   token_input: number;
   token_output: number;
   token_total: number;
+  // S9: PID of the currently running agent subprocess (null when not running).
+  agent_pid: number | null;
 }
 
 export interface SymphonyEvent {

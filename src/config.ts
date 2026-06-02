@@ -2,6 +2,8 @@ import { z } from "zod";
 
 const ConfigSchema = z.object({
   PORT: z.coerce.number().default(4123),
+  HOST: z.string().default("127.0.0.1"),
+  API_TOKEN: z.string().optional(),
   DB_PATH: z.string().default("./symphony.db"),
   WORKFLOW_PATH: z.string().default("./WORKFLOW.md"),
   NANO_BIN: z.string().default("nano"),

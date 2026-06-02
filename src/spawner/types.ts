@@ -8,25 +8,7 @@ export interface SpawnContext {
   binary: string;
   timeoutMs: number;
   outputDir: string;
-  sandboxConfig?: {
-    backend: "native" | "docker" | "none";
-    network_access: boolean;
-    extra_read_only_paths: string[];
-    extra_writable_paths: string[];
-    extra_denied_paths: string[];
-    docker_image?: string;
-    docker_runtime?: string;
-  };
-  permissionMode?: string;
-  permissionAuto?: {
-    backend: "llm" | "fail_closed";
-    model?: string;
-    confidence_threshold: number;
-    timeout_seconds: number;
-    cache_ttl_minutes: number;
-    allow_rules: string[];
-    denial_max_consecutive: number;
-    denial_max_total: number;
-  };
+  /** Extra env vars to inject into the agent process (from workflow agent.extra_env). */
+  extraEnv?: Record<string, string>;
   logger?: { warn: (obj: unknown, msg: string) => void };
 }

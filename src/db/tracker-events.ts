@@ -26,6 +26,12 @@ export function createEventOps(db: Database) {
     LIMIT 1
   `);
 
+  const getEventsByKindStmt = db.prepare(`
+    SELECT * FROM symphony_events
+    WHERE issue_id = ? AND kind = ?
+    ORDER BY ts ASC, rowid ASC
+  `);
+
   /**
    * Records an event for an issue.
    *
@@ -55,9 +61,14 @@ export function createEventOps(db: Database) {
     return (getLatestEventByKindStmt.get(issueId, kind) as SymphonyEvent | null) ?? null;
   }
 
+  function getEventsByKind(issueId: string, kind: string): SymphonyEvent[] {
+    return getEventsByKindStmt.all(issueId, kind) as SymphonyEvent[];
+  }
+
   return {
     recordEvent,
     getEvents,
     getLatestEventByKind,
+    getEventsByKind,
   };
 }

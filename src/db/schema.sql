@@ -11,8 +11,7 @@ CREATE TABLE IF NOT EXISTS issues (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_blocker_fingerprint TEXT,
-  agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind IN ('nano', 'claude-code')),
-  agent_binary TEXT
+  agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind IN ('nano', 'claude-code'))
 );
 
 CREATE TABLE IF NOT EXISTS issue_labels (

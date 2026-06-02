@@ -67,12 +67,23 @@ For more verbose logging during development:
 LOG_LEVEL=debug bun run start
 ```
 
-### 4. Create a Demo Issue
+### 4. Export API Token
+
+All `/api/v1/*` endpoints (except `/api/v1/health`) require authentication. Export the token from `.env` once and reuse it for every `curl` command below:
+
+```bash
+TOKEN=$(grep '^API_TOKEN=' .env | cut -d= -f2-)
+```
+
+The token was generated automatically by `init-project.sh`. To view it at any time: `grep API_TOKEN .env`.
+
+### 5. Create a Demo Issue
 
 **Critical:** Use `state: "todo"` or `state: "in_progress"`, NOT `state: "backlog"`. The orchestrator's candidate SQL filters out backlog issues by default.
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
     "identifier": "DEMO-1",
@@ -85,12 +96,12 @@ curl -X POST http://localhost:4123/api/v1/issues \
 
 The orchestrator will pick up this issue within the next tick (default: 5 seconds, see `ORCHESTRATOR_TICK_MS`).
 
-### 5. Observe Events
+### 6. Observe Events
 
 Fetch the event timeline to see progress:
 
 ```bash
-curl -s http://localhost:4123/api/v1/events | jq '.[] | {ts, kind, message}'
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/events | jq '.[] | {ts, kind, message}'
 ```
 
 Expected event sequence:
@@ -103,10 +114,10 @@ Expected event sequence:
 Alternatively, stream events in real-time via SSE:
 
 ```bash
-curl -N http://localhost:4123/api/v1/events/stream
+curl -N -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/events/stream
 ```
 
-### 6. Check Agent Logs
+### 7. Check Agent Logs
 
 Agent stdout/stderr is captured in the workspace:
 
@@ -121,15 +132,15 @@ The result is the last JSON line in stdout matching the `AgentResultSummary` sch
 {"status":"success","reason":"task completed","goal_state":{"last_reason":"hello world printed"},"tokens":{"input":1200,"output":350}}
 ```
 
-### 7. Verify Final State
+### 8. Verify Final State
 
 ```bash
-curl -s http://localhost:4123/api/v1/issues/$(curl -s http://localhost:4123/api/v1/issues | jq -r '.[0].id') | jq '{state, updated_at}'
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/issues/$(curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/issues | jq -r '.[0].id') | jq '{state, updated_at}'
 ```
 
 The issue should transition to `done`, `in_review`, or `cancelled` based on your workflow's `state_transitions` config (default: `success -> done`, `abandoned -> cancelled`, `handoff -> in_review`).
 
-### 8. Check Health
+### 9. Check Health
 
 ```bash
 curl -s http://localhost:4123/api/v1/health | jq
@@ -167,6 +178,7 @@ To use Claude Code instead of nano:
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
     "identifier": "DEMO-2",
@@ -191,6 +203,7 @@ Key differences:
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues/<ID>/comments \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"body": "Focus on the edge case where input is empty", "author": "alice"}'
 ```
@@ -200,7 +213,7 @@ Comments are injected into the next attempt's prompt automatically.
 ### Cancelling a running agent
 
 ```bash
-curl -X POST http://localhost:4123/api/v1/runs/<ISSUE_ID>/cancel
+curl -X POST -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/runs/<ISSUE_ID>/cancel
 ```
 
 Sends SIGTERM to the agent process, then SIGKILL after 3 seconds.
@@ -209,6 +222,7 @@ Sends SIGTERM to the agent process, then SIGKILL after 3 seconds.
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues/<ID>/request-changes \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"note": "Tests are failing, please fix the edge case"}'
 ```
@@ -219,6 +233,7 @@ Reverts issue to `todo` and injects the note into next attempt's prompt.
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues/<ID>/retrigger \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"target_state": "todo", "reset_blocker_fingerprint": true, "note": "Try again with updated context"}'
 ```
@@ -227,6 +242,7 @@ curl -X POST http://localhost:4123/api/v1/issues/<ID>/retrigger \
 
 ```bash
 curl -X POST http://localhost:4123/api/v1/issues/<ID>/approve \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"note": "Looks good, merging"}'
 ```
@@ -280,12 +296,16 @@ LOG_LEVEL=debug bun run start > /tmp/symphony.out 2>&1 &
 SYM_PID=$!
 sleep 3
 
-# 2. Verify service is up
+# 2. Verify service is up (/health is auth-exempt)
 curl -fsS http://localhost:4123/api/v1/health | jq '.status'
 # Expected: "ok"
 
+# 2.5. Export API token for authenticated requests
+TOKEN=$(grep '^API_TOKEN=' .env | cut -d= -f2-)
+
 # 3. Create a todo issue (NOT backlog)
 curl -X POST http://localhost:4123/api/v1/issues \
+  -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
     "identifier": "DEMO-1",
@@ -299,14 +319,14 @@ curl -X POST http://localhost:4123/api/v1/issues \
 sleep 10
 
 # 5. Check events
-curl -s http://localhost:4123/api/v1/events | jq -r '.[] | "\(.ts) \(.kind) \(.message)"'
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/events | jq -r '.[] | "\(.ts) \(.kind) \(.message)"'
 
 # 6. Check logs
 ls workspaces/DEMO-1/logs/
 tail -50 workspaces/DEMO-1/logs/attempt-0.log
 
 # 7. Verify final state
-curl -s http://localhost:4123/api/v1/issues | jq -r '.[0] | {identifier, state, updated_at}'
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/issues | jq -r '.[0] | {identifier, state, updated_at}'
 
 # 8. Check run log
 tail -1 run_log.jsonl | jq
@@ -326,31 +346,32 @@ kill $SYM_PID
 ### Check Active Runs
 
 ```bash
-curl -s http://localhost:4123/api/v1/runs | jq
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/runs | jq
 ```
 
 ### Stream Events (SSE)
 
 ```bash
-curl -N http://localhost:4123/api/v1/events/stream
+curl -N -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/events/stream
 ```
 
 ### Stream Agent Logs (SSE)
 
 ```bash
-curl -N http://localhost:4123/api/v1/logs/<ISSUE_ID>/current
+curl -N -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/logs/<ISSUE_ID>/current
 ```
 
 ### Query Specific Issue
 
 ```bash
-curl -s http://localhost:4123/api/v1/issues/<ISSUE_ID> | jq
+curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/issues/<ISSUE_ID> | jq
 ```
 
 ## Troubleshooting
 
 | Symptom | Root Cause | Fix |
 |---------|-----------|------|
+| `{"error":"Unauthorized"}` / HTTP 401 on any API call | `X-Symphony-Token` header missing or wrong token | Export token: `TOKEN=$(grep '^API_TOKEN=' .env \| cut -d= -f2-)` then add `-H "X-Symphony-Token: ${TOKEN}"` to every `curl` command. `/api/v1/health` is the only exempt endpoint. |
 | Issue created but never gets `started` event | `state=backlog` is filtered by candidate SQL | Create with `state: "todo"` or `state: "in_progress"` |
 | `started` then immediate `abandoned` (exit code 1) | Binary not found or sandbox denial | Check `attempt-N.log` for error; verify `nano` is on PATH |
 | Agent reports success but symphony records `needs_retry` | Exit code was non-zero despite success payload | Check for crash during agent cleanup; fix agent exit logic |

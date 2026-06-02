@@ -20,13 +20,13 @@ describe("POST /issues — agent overrides", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: "t", state: "todo",
-        agent_kind: "claude-code", agent_binary: "/opt/claude",
+        agent_kind: "claude-code",
+        // S2: agent_binary is no longer accepted via the HTTP API (server-side only)
       }),
     });
     expect(r.status).toBe(201);
     const body: any = await r.json();
     expect(body.agent_kind).toBe("claude-code");
-    expect(body.agent_binary).toBe("/opt/claude");
   });
 
   test("rejects bad agent_kind", async () => {
@@ -69,6 +69,26 @@ describe("POST /issues — agent overrides", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent_model: "opus" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  test("POST rejects permission_mode_override (removed field)", async () => {
+    const { app } = mkApp();
+    const r = await app.request("/issues", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "t", state: "todo", permission_mode_override: "auto" }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  test("POST rejects sandbox_extra_read_only_paths (removed field)", async () => {
+    const { app } = mkApp();
+    const r = await app.request("/issues", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "t", state: "todo", sandbox_extra_read_only_paths: ["/tmp"] }),
     });
     expect(r.status).toBe(400);
   });
