@@ -1,5 +1,6 @@
 export interface Issue {
-  id: string;
+  id: number;
+  uuid: string;
   identifier: string;
   title: string;
   description: string | null;
@@ -9,15 +10,19 @@ export interface Issue {
   url: string | null;
   workspace_path: string | null;
   agent_kind: "nano" | "claude-code" | null;
+  agent_binary: string | null;
+  require_plan: boolean | null;
+  plan_run_id: string | null;
+  expected_schema: string | null;
+  scratchpad: string | null;
   created_at: string;
   updated_at: string;
   labels: string[];
-  blockers: Array<{ blocker_id: string; blocker_state: string }>;
+  blockers: Array<{ blocker_uuid: string; blocker_state: string }>;
 }
 
 export interface IssueInput {
-  id: string;
-  identifier: string;
+  uuid: string;
   title: string;
   description?: string | null;
   priority?: string;
@@ -26,11 +31,16 @@ export interface IssueInput {
   url?: string | null;
   workspace_path?: string | null;
   agent_kind?: "nano" | "claude-code" | null;
+  agent_binary?: string | null;
+  require_plan?: boolean | null;
+  plan_run_id?: string | null;
+  expected_schema?: string | null;
+  scratchpad?: string | null;
   labels?: string[];
 }
 
 export interface SymphonyRun {
-  issue_id: string;
+  issue_uuid: string;
   next_attempt: number;
   current_attempt: number | null;
   last_state: string;
@@ -46,11 +56,14 @@ export interface SymphonyRun {
   token_total: number;
   // S9: PID of the currently running agent subprocess (null when not running).
   agent_pid: number | null;
+  // Heartbeat fields: agent liveness tracking
+  heartbeat_at: number | null;
+  heartbeat_timeout_ms: number | null;
 }
 
 export interface SymphonyEvent {
   id: string;
-  issue_id: string;
+  issue_uuid: string;
   ts: number;
   kind: string;
   message: string;
@@ -59,7 +72,7 @@ export interface SymphonyEvent {
 
 export interface Comment {
   id: string;
-  issue_id: string;
+  issue_uuid: string;
   ts: number;
   author: string;
   body: string;

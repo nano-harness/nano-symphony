@@ -53,7 +53,7 @@ export function createMcpRouter(
         const result = await handleTool(
           name,
           args,
-          auth.issueId,
+          auth.issueUuid,
           auth.attempt,
           tracker,
           wf ? { template: wf.template } : undefined

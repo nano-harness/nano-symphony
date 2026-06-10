@@ -6,7 +6,7 @@ const ConfigSchema = z.object({
   API_TOKEN: z.string().optional(),
   DB_PATH: z.string().default("./symphony.db"),
   WORKFLOW_PATH: z.string().default("./WORKFLOW.md"),
-  NANO_BIN: z.string().default("nano"),
+  NANO_BIN: z.string().default("claude"),
   WORKSPACE_ROOT: z.string().default("./workspaces"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
   MAX_CONCURRENT_AGENTS: z.coerce.number().int().min(1).default(3),
@@ -15,6 +15,10 @@ const ConfigSchema = z.object({
   ALLOW_REVEAL_WORKSPACE: z.coerce.boolean().default(true),
   RUN_LOG_PATH: z.string().default("./run_log.jsonl"),
   RUN_LOG_ENABLED: z.coerce.boolean().default(true),
+  // Heartbeat configuration
+  AGENT_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1_000).default(30_000),
+  AGENT_HEARTBEAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(120_000),
+  AGENT_HEARTBEAT_STALE_ACTION: z.enum(["cancel_then_retry", "retry", "abandon"]).default("cancel_then_retry"),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

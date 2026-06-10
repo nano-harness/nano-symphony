@@ -12,6 +12,7 @@ export interface E2eOptions {
   timeoutSec?: number;
   realBinary?: string;       // If provided, uses real nano-agent instead of mock
   promptOverride?: string;   // Custom prompt template
+  maxRetries?: number;      // Override max_retries (default 0 for fast tests)
 }
 
 export interface E2eResult {
@@ -48,18 +49,20 @@ async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, tickMs = 1
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-function buildWorkflowMd(agentBinary: string, mockEnv: Record<string, string>, promptOverride?: string): string {
+function buildWorkflowMd(agentBinary: string, mockEnv: Record<string, string>, opts: { promptOverride?: string; maxRetries?: number } = {}): string {
   const defaultPrompt = "{{ issue.title }}\\n\\nAttempt: {{ attempt }}\\n\\n{{ issue.description }}";
-  const prompt = promptOverride ?? defaultPrompt;
+  const prompt = opts.promptOverride ?? defaultPrompt;
+  const maxRetries = opts.maxRetries ?? 0;
 
   const lines = [
     "---",
     "tracker:",
     "  type: e2e",
     "agent:",
+    "  kind: nano",
     `  binary: \"${agentBinary.replace(/\\/g, "\\\\")}\"`,
     "  timeout_ms: 10000",
-    "  max_retries: 0",
+    `  max_retries: ${maxRetries}`,
   ];
 
   if (Object.keys(mockEnv).length > 0) {
@@ -115,7 +118,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
     if (opts.mockSleepSec != null) mockEnv.MOCK_SLEEP_BEFORE_COMPLETE = String(opts.mockSleepSec);
   }
 
-  await fs.writeFile(workflowPath, buildWorkflowMd(agentBinary, mockEnv, opts.promptOverride), "utf-8");
+  await fs.writeFile(workflowPath, buildWorkflowMd(agentBinary, mockEnv, { promptOverride: opts.promptOverride, maxRetries: opts.maxRetries }), "utf-8");
 
   const e2eApiToken = "e2e-test-api-token";
   const env: Record<string, string> = {
@@ -162,7 +165,6 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
       method: "POST",
       headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({
-        identifier: `E2E-${port}`,
         title: "E2E debug issue",
         description: "Created by bun:test",
         priority: "medium",
@@ -171,8 +173,8 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
       }),
     });
 
-    const issueId = issue?.id as string | undefined;
-    if (!issueId) throw new Error(`Missing issue id in response: ${JSON.stringify(issue)}`);
+    const issueId = issue?.uuid as string | undefined;
+    if (!issueId) throw new Error(`Missing issue uuid in response: ${JSON.stringify(issue)}`);
 
     // Default orchestrator tick is 5s; give it enough time.
     await waitFor(
@@ -190,7 +192,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
 
     const run = await fetchJson(`${baseUrl}/api/v1/runs/${issueId}`, { headers: authHeaders });
     const events = await fetchJson(`${baseUrl}/api/v1/events`, { headers: authHeaders });
-    const issueEvents = (events as any[]).filter((e) => e.issue_id === issueId);
+    const issueEvents = (events as any[]).filter((e) => e.issue_uuid === issueId);
 
     return { issueId, run, events: issueEvents, baseUrl, e2eRoot };
   } catch (err) {

@@ -46,7 +46,7 @@ export function App() {
   return (
     <Router root={Layout}>
       <Route path="/" component={Dashboard} />
-      <Route path="/issues/:id" component={IssueDetail} />
+      <Route path="/issues/:uuid" component={IssueDetail} />
       <Route path="/workflow" component={WorkflowEditor} />
     </Router>
   );

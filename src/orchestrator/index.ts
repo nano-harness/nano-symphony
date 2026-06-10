@@ -3,6 +3,7 @@ import type { Workflow } from "../workflow/types.ts";
 import { runWorker, type WorkerContext } from "./worker.ts";
 import { config } from "../config.ts";
 import type { Logger } from "pino";
+import { tickPendingPlans, tickApprovedPlans, tickFinalizedPlans, tickExpiredPlans } from "./plan-tick.ts";
 
 class Semaphore {
   private count: number;
@@ -54,6 +55,12 @@ export function createOrchestrator(
     const wf = getWorkflow();
     if (!wf) return 0;
 
+    // Run plan sub-loops first (they update issue states that affect candidate queries)
+    await tickPendingPlans(tracker, logger);
+    await tickApprovedPlans(tracker, logger);
+    await tickFinalizedPlans(tracker, logger);
+    await tickExpiredPlans(tracker, logger);
+
     const slots = sem.available();
     if (slots <= 0) return 0; // Already at capacity, skip this tick
 
@@ -69,34 +76,41 @@ export function createOrchestrator(
     const candidates = remainingSlots > 0 ? tracker.getCandidates(remainingSlots) : [];
 
     const toDispatch = [
-      ...retries.map((r) => ({ issueId: r.issue_id, attempt: r.next_attempt })),
+      ...retries.map((r) => ({ issueUuid: r.issue_uuid, attempt: r.next_attempt })),
       ...candidates
-        .filter((c) => !retries.find((r) => r.issue_id === c.id))
+        .filter((c) => !retries.find((r) => r.issue_uuid === c.uuid))
         .map((c) => {
-          const existingRun = tracker.getRun(c.id);
+          const existingRun = tracker.getRun(c.uuid);
           const attempt = existingRun ? existingRun.next_attempt + 1 : 0;
-          return { issueId: c.id, attempt };
+          return { issueUuid: c.uuid, attempt };
         }),
     ].slice(0, slots);
 
-    for (const { issueId, attempt } of toDispatch) {
-      // Claim issue before acquiring semaphore to prevent race conditions
-      // where multiple ticks could dispatch the same issue concurrently.
-
-      // Check if this is a todo issue that needs to enter the planning phase first
-      const issueForDispatch = tracker.getIssue(issueId);
-      if (issueForDispatch && issueForDispatch.state === "todo") {
-        const planningConfig = wf.workflow.agent?.planning;
-        const planningEnabled = planningConfig?.enabled ?? false;
-        const skipLabels = planningConfig?.skip_labels ?? [];
-        const issueLabels = issueForDispatch.labels ?? [];
-        const hasSkipLabel = skipLabels.some((sl) => issueLabels.includes(sl));
-        if (planningEnabled && !hasSkipLabel) {
-          tracker.updateIssueState(issueId, "planning");
+    // Auto-release stale claimed runs before dispatching new work
+    const STALE_RUN_TIMEOUT_MS = 5 * 60 * 1000;
+    const staleRuns = tracker.fetchStaleRuns(Date.now() - STALE_RUN_TIMEOUT_MS);
+    for (const staleRun of staleRuns) {
+      tracker.withTransaction(() => {
+        tracker.releaseIssue(staleRun.issue_uuid, "released");
+        tracker.recordEvent(staleRun.issue_uuid, "stale_run_detected", `Run claimed for ${staleRun.current_attempt} turns was abandoned (no heartbeat)`, { attempt: staleRun.current_attempt });
+        const issue = tracker.getIssue(staleRun.issue_uuid);
+        if (issue && (issue.state === "in_progress" || issue.state === "planning")) {
+          tracker.updateIssueState(staleRun.issue_uuid, "todo");
         }
-      }
+      });
+      logger.warn(`Released stale run for ${staleRun.issue_uuid} (attempt ${staleRun.current_attempt}, no heartbeat)`);
+    }
 
-      const claimed = tracker.claimIssue(issueId, attempt);
+    for (const { issueUuid, attempt } of toDispatch) {
+      const claimed = tracker.withTransaction(() => {
+        const issue = tracker.getIssue(issueUuid);
+        // Auto-trigger planning mode for issues that require a plan and are still in todo
+        if (issue && issue.require_plan === true && issue.state === "todo") {
+          tracker.updateIssueState(issueUuid, "planning");
+          tracker.recordEvent(issueUuid, "planning_triggered", "Issue requires a plan — entering planning mode", { require_plan: true });
+        }
+        return tracker.claimIssue(issueUuid, attempt);
+      });
       if (!claimed) continue; // Already claimed by another tick
 
       const ctx: WorkerContext = {
@@ -107,7 +121,7 @@ export function createOrchestrator(
       };
 
       void sem.acquire().then(() => {
-        return runWorker(issueId, attempt, ctx).finally(() => sem.release());
+        return runWorker(issueUuid, attempt, ctx).finally(() => sem.release());
       });
     }
 

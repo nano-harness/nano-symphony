@@ -2,8 +2,9 @@ import { createSignal, Show, For, onMount } from "solid-js";
 import { api } from "./api";
 
 interface HandoffPanelProps {
-  issueId: string;
+  issueUuid: string;
   issueState: string;
+  onActionComplete?: () => void;
 }
 
 export function HandoffPanel(props: HandoffPanelProps) {
@@ -15,7 +16,7 @@ export function HandoffPanel(props: HandoffPanelProps) {
   onMount(async () => {
     if (props.issueState === "in_review" || props.issueState === "done") {
       try {
-        const data = await api.getHandoff(props.issueId);
+        const data = await api.getHandoff(props.issueUuid);
         setHandoff(data);
       } catch {
         // No handoff yet
@@ -26,8 +27,8 @@ export function HandoffPanel(props: HandoffPanelProps) {
   const handleApprove = async () => {
     setLoading(true);
     try {
-      await api.approveHandoff(props.issueId);
-      window.location.reload();
+      await api.approveHandoff(props.issueUuid);
+      props.onActionComplete?.();
     } catch (err) {
       alert("Failed to approve");
     } finally {
@@ -42,8 +43,8 @@ export function HandoffPanel(props: HandoffPanelProps) {
     }
     setLoading(true);
     try {
-      await api.requestChanges(props.issueId, reviewNote());
-      window.location.reload();
+      await api.requestChanges(props.issueUuid, reviewNote());
+      props.onActionComplete?.();
     } catch (err) {
       alert("Failed to request changes");
     } finally {
@@ -53,7 +54,7 @@ export function HandoffPanel(props: HandoffPanelProps) {
 
   const handleRevealWorkspace = async () => {
     try {
-      const result = await api.revealWorkspace(props.issueId);
+      const result = await api.revealWorkspace(props.issueUuid);
       console.log("Opened workspace:", result.path);
     } catch (err) {
       alert("Failed to open workspace");

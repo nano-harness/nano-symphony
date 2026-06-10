@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
 export type RunPatch = {
-  issue_id: string;
+  issue_uuid: string;
   last_state?: string;
   current_attempt?: number;
   next_attempt?: number;

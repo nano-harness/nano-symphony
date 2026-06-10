@@ -3,13 +3,31 @@ import type { Tracker } from "../db/tracker.ts";
 
 const engine = new Liquid({ strictVariables: true, strictFilters: true });
 
+/** LRU-like template cache to avoid re-parsing the same workflow template on every dispatch. */
+const templateCache = new Map<string, ReturnType<typeof engine.parse>>();
+const MAX_TEMPLATE_CACHE_SIZE = 10;
+
+function getCachedTemplate(template: string): ReturnType<typeof engine.parse> {
+  const cached = templateCache.get(template);
+  if (cached) return cached;
+
+  const tpl = engine.parse(template);
+  // Evict oldest entry if at capacity
+  if (templateCache.size >= MAX_TEMPLATE_CACHE_SIZE) {
+    const firstKey = templateCache.keys().next().value;
+    if (firstKey !== undefined) templateCache.delete(firstKey);
+  }
+  templateCache.set(template, tpl);
+  return tpl;
+}
+
 export interface RenderPromptOptions {
   goal?: {
     condition: string;
     inject_mode?: "prefix" | "system" | "none";
   };
   tracker?: Tracker;
-  issueId?: string;
+  issueUuid?: string;
 }
 
 export interface RenderPromptMeta {
@@ -86,9 +104,9 @@ export async function renderPrompt(
   const meta: RenderPromptMeta = { commentIds: [], truncated: false };
 
   // Inject reviewer notes if present
-  if (opts.tracker && opts.issueId) {
-    const revisionEvent = opts.tracker.getLatestEventByKind(opts.issueId, "revision_requested");
-    const startedEvent = opts.tracker.getLatestEventByKind(opts.issueId, "started");
+  if (opts.tracker && opts.issueUuid) {
+    const revisionEvent = opts.tracker.getLatestEventByKind(opts.issueUuid, "revision_requested");
+    const startedEvent = opts.tracker.getLatestEventByKind(opts.issueUuid, "started");
 
     // Only inject if revision_requested is more recent than the last started event
     if (revisionEvent && (!startedEvent || revisionEvent.ts > startedEvent.ts)) {
@@ -100,8 +118,8 @@ export async function renderPrompt(
   }
 
   // Inject comments if present
-  if (opts.tracker && opts.issueId) {
-    const comments = opts.tracker.listComments(opts.issueId);
+  if (opts.tracker && opts.issueUuid) {
+    const comments = opts.tracker.listComments(opts.issueUuid);
     if (comments.length > 0) {
       const { rendered, includedIds, truncated } = formatComments(comments);
       prefix += rendered;
@@ -110,12 +128,39 @@ export async function renderPrompt(
     }
   }
 
-  // Inject goal if present
-  if (opts.goal?.condition && (opts.goal.inject_mode ?? "prefix") === "prefix") {
-    prefix += `/goal ${opts.goal.condition}\n\n`;
+  // Inject planning instruction if issue is in planning state
+  if (opts.tracker && opts.issueUuid) {
+    const issue = opts.tracker.getIssue(opts.issueUuid);
+    if (issue && issue.state === "planning") {
+      prefix +=
+        `## Planning Mode\n\n` +
+        `You are in PLANNING mode. Your task is to analyze the issue and produce a detailed implementation plan.\n\n` +
+        `1. Break down the work into clear steps\n` +
+        `2. Estimate complexity, files touched, and expected turns\n` +
+        `3. Submit your plan using: symphony.submit_plan({ markdown: "...", steps: [...], estimates: {...} })\n` +
+        `4. After submitting the plan, call symphony.session_completed\n\n` +
+        `Do NOT implement anything yet — only produce the plan.\n\n`;
+    }
   }
 
-  const rendered = await engine.parseAndRender(template, vars);
+  // Override goal for planning mode
+  const isPlanning = opts.tracker && opts.issueUuid
+    ? opts.tracker.getIssue(opts.issueUuid)?.state === "planning"
+    : false;
+
+  // Inject goal if present
+  if (opts.goal?.condition) {
+    const mode = opts.goal.inject_mode ?? "prefix";
+    if (mode === "prefix") {
+      const goalCondition = isPlanning
+        ? "Submit a detailed implementation plan using symphony.submit_plan, then call symphony.session_completed"
+        : opts.goal.condition;
+      prefix += `/goal ${goalCondition}\n\n`;
+    }
+  }
+
+  const tpl = getCachedTemplate(template);
+  const rendered = await engine.render(tpl, vars);
 
   // Sanity check: verify issue content was actually injected into the rendered prompt
   const issueTitle = (vars.issue as Record<string, unknown> | undefined)?.title as string | undefined;

@@ -7,6 +7,7 @@ import { createTracker } from "./db/tracker.ts";
 import { loadWorkflow, watchWorkflow } from "./workflow/loader.ts";
 import { createHttpServer } from "./http/server.ts";
 import { createOrchestrator } from "./orchestrator/index.ts";
+import { resumeRunningPlans } from "./orchestrator/plan-tick.ts";
 import { bus } from "./db/event_bus.ts";
 import { getActiveProcessCount, killAllAgents } from "./spawner/index.ts";
 import { setTokenTtl } from "./mcp/auth.ts";
@@ -46,13 +47,13 @@ async function main() {
   // We stored PIDs in symphony_runs.agent_pid; verify each is still running and looks
   // like a child process before sending SIGKILL, then clear the stored PIDs.
   const stalePidRows = db.prepare(
-    `SELECT issue_id, agent_pid FROM symphony_runs WHERE agent_pid IS NOT NULL`
-  ).all() as Array<{ issue_id: string; agent_pid: number }>;
-  for (const { issue_id: issueId, agent_pid: pid } of stalePidRows) {
+    `SELECT issue_uuid, agent_pid FROM symphony_runs WHERE agent_pid IS NOT NULL`
+  ).all() as Array<{ issue_uuid: string; agent_pid: number }>;
+  for (const { issue_uuid: issueUuid, agent_pid: pid } of stalePidRows) {
     try {
       // SIGKILL best-effort; if already dead the error is swallowed.
       process.kill(pid, "SIGKILL");
-      logger.warn({ issueId, pid }, "Killed orphaned agent process from previous run");
+      logger.warn({ issueUuid, pid }, "Killed orphaned agent process from previous run");
     } catch { /* already dead */ }
   }
   if (stalePidRows.length > 0) {
@@ -64,7 +65,7 @@ async function main() {
   try { currentWorkflow = loadWorkflow(config.WORKFLOW_PATH); } catch (err) { logger.warn({ err }, "Could not load workflow"); }
   watchWorkflow(config.WORKFLOW_PATH, (workflow, template) => {
     currentWorkflow = { workflow, template };
-    bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_id: null, message: "workflow reloaded via watcher", payload_json: null });
+    bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_uuid: null, message: "workflow reloaded via watcher", payload_json: null });
   }, logger);
   const getWorkflow = () => currentWorkflow;
   const reloadWorkflow = (): { workflow: Workflow; template: string } | null => {
@@ -79,6 +80,11 @@ async function main() {
     }
   };
   const orchestrator = createOrchestrator(tracker, getWorkflow, logger);
+
+  // Resume any plan runs that were in-flight before a crash restart.
+  // Must happen before orchestrator.start() so the resumed runs are
+  // eligible for orchestrator ticks immediately.
+  await resumeRunningPlans(tracker, logger);
 
   const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick(), { reloadWorkflow, apiToken });
   const server = Bun.serve({

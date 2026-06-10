@@ -25,20 +25,36 @@ export const WorkflowSchema = z.object({
     }).default({}),
   }).optional(),
 	  agent: z.object({
-    kind: z.enum(["nano", "claude-code"]).default("nano"),
+    kind: z.enum(["nano", "claude-code"]).default("claude-code"),
     binary: z.string().optional(),
     timeout_ms: z.number().default(3600000),
     max_retries: z.number().default(3),
     extra_env: z.record(z.string()).optional().default({}),
+    permission_mode: z.string().optional(),
+    permissions: z.object({
+      allow: z.array(z.string()).optional(),
+      deny: z.array(z.string()).optional(),
+      denial_max_consecutive: z.number().int().nonnegative().optional(),
+      denial_max_total: z.number().int().nonnegative().optional(),
+    }).optional(),
+    sandbox: z.object({
+      extra_writable_paths: z.array(z.string()).optional(),
+    }).passthrough().optional(),
+    trusted_binaries: z.array(z.string()).optional(),
+    hooks: z.record(z.unknown()).optional(),
+    /**
+     * @deprecated Planning mode has been replaced by plan-run (spawn_plan_run / spawn_plan_run_and_handoff).
+     * This field is ignored and will be removed in a future version.
+     */
     planning: z.object({
       enabled: z.boolean().default(false),
       skip_labels: z.array(z.string()).default([]),
       auto_approve_on_low: z.boolean().default(false),
-      planning_timeout_ms: z.number().default(300000),
+      planning_timeout_ms: z.number().default(86400000),
       max_plan_revisions: z.number().default(3),
       template: z.string().optional(),
     }).optional(),
-	  }).optional(),
+	  }).passthrough().optional(),
   goal: z.object({
     condition: z.string().min(1),
     max_turns: z.number().int().positive().default(50),
@@ -54,6 +70,7 @@ export const WorkflowSchema = z.object({
     abandoned: z.string().nullable().default("cancelled"),
     handoff: z.string().nullable().default("in_review"),
     needs_retry: z.string().nullable().default(null),
+    blocked: z.string().nullable().default("blocked"),
   }).optional().default({}),
 });
 

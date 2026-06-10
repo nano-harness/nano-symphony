@@ -7,7 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes — Schema Redesign (requires manual DB wipe before upgrade)
+
+> ⚠️ **Action required before merging**: Run `rm ~/.local/share/nano-symphony/symphony.db` to wipe the existing database. The new schema is incompatible with the old one and no migration is provided. All subsequent server starts will initialize a clean database from the new schema.
+
+- **`issues.id` is now `INTEGER PRIMARY KEY AUTOINCREMENT`** (was `TEXT` nanoid). The auto-increment integer is stable, race-free, and O(1).
+- **`issues.uuid`** (new column): holds the former nanoid string (was `issues.id`).
+- **`issues.identifier` column dropped**: computed on-the-fly as `TASK-${id}` at the application layer; never stored in the database.
+- **FK columns renamed across 7 tables**: `issue_id` → `issue_uuid`, `blocker_id` → `blocker_uuid`, `caller_issue_id` → `caller_issue_uuid` (affected tables: `issue_labels`, `issue_blockers`, `symphony_runs`, `symphony_events`, `issue_comments`, `symphony_artifacts`, `issue_results`, `plan_runs`).
+- **`idx_issues_identifier` index dropped** (column no longer exists).
+- **HTTP API — `POST /api/v1/issues`**: Sending `id`, `identifier`, or `uuid` fields now returns `400` with an explicit error message.
+- **HTTP API — URL params**: All `/api/v1/issues/:id` path parameters renamed to `/api/v1/issues/:uuid`.
+- **HTTP API — GET response**: Issues now include `id` (integer) and `uuid` (nanoid string). The `identifier` field (`TASK-N`) is still present but computed.
+- **Environment variable**: `SYMPHONY_ISSUE_ID` renamed to `SYMPHONY_ISSUE_UUID` in worker subprocess environments.
+- **Frontend sort**: Issue list now sorts by `id` (integer) instead of `identifier` string, fixing lexicographic ordering (e.g., TASK-10 no longer sorts before TASK-2).
+- **Wrapper**: `next_identifier()` function removed from `install.sh`; `symphony issue create` no longer sends an `identifier` field.
+
 ### Added
+- **Bundle distribution**: `scripts/build-bundle.sh` produces a single minified `index.js` (~484 KB) bundled with `bun build --minify --target=bun`, packaged alongside `share/frontend/dist/`, `share/skills/`, `share/templates/`, and `share/VERSION` in a ~5 MB tarball.
+- **`src/paths.ts`**: Centralised asset-root resolution. Reads `SYMPHONY_SHARE_ROOT` env var (set by wrapper at runtime), with a CWD fallback for bundle-layout directories, and fails hard if neither is found.
+- **Global skill install**: `install.sh` now copies `share/skills/nano-symphony/` to `~/.nano/skills/nano-symphony/` and, if `~/.claude/` exists, to `~/.claude/skills/nano-symphony/` on every install/update — no per-workspace sync needed.
+- **CI smoke test**: Release workflow runs `curl /api/v1/health` against the extracted bundle before publishing.
+
+### Changed
+- **`install.sh`** rewritten for bundle distribution: no more `bun install`, source-mode leftovers (`src/`, `node_modules/`, `package.json`, etc.) are cleaned up on upgrade, WORKFLOW template sourced from `share/templates/`, version read from `share/VERSION`.
+- **Wrapper `start`** now runs `exec bun ${INSTALL_DIR}/index.js` with `SYMPHONY_SHARE_ROOT` set; `version` reads `share/VERSION`.
+- **Release CI** pins Bun to `1.2.x` across all jobs; `build` job replaced with `scripts/build-bundle.sh`; `meta.json` gains `built_with` field.
+- **`src/http/server.ts`**: static root resolved from `FRONTEND_DIST` (via `paths.ts`) instead of `SYMPHONY_STATIC_ROOT` env var.
+
+### Removed
+- **`syncSkillsIfMissing`** function removed from `src/workspace/manager.ts`; skill distribution is now handled exclusively by `install.sh` into agent-global directories.
+
+### Breaking
+- **`symphony dev | build | test | lint`** subcommands in bundle installs now exit 64 with a clear error. Source-mode development requires `SYMPHONY_SHARE_ROOT=$(pwd) bun --watch src/index.ts`.
+- **`symphony version`** reads `share/VERSION` instead of `package.json`. Source installs that lack `share/VERSION` should set `SYMPHONY_SHARE_ROOT`.
+
+### Added
+- **Plan Runs**: New `plan_runs` table — agents write inline JS scripts that orchestrate sub-issue fan-out with dry-run, human approval, and structured result emission. Supports `pending → dry_running → awaiting_approval → running → done/failed/cancelled` lifecycle.
+- **Issue Results**: New `issue_results` table with versioned upsert; `emit_result` stores structured output per `(issue_id, attempt, version)`.
+- **MCP Tools — New**: `symphony.emit_result`, `symphony.spawn_plan_run`, `symphony.spawn_plan_run_and_handoff`, `symphony.get_artifact`, `symphony.update_issue_scratchpad`.
+- **MCP Tools — session_completed**: `summary` is now optional; `metrics` field deprecated (no longer consumed).
+- **Issues — New Columns**: `plan_run_id`, `expected_schema`, `scratchpad` (auto-migrated).
+- **Wait States**: `awaiting_plan` wait state added; `getCandidatesStmt` excludes it from scheduling so plan-paused issues are not re-dispatched.
+- **Orchestrator — Plan Sub-loops**: Four new idempotent tick loops: `tickPendingPlans` (dry-run), `tickApprovedPlans` (start execution), `tickFinalizedPlans` (resume caller), `tickExpiredPlans` (wall-time enforcement, 7-day default).
+- **Plan Runtime — Sandbox**: `node:vm` sandbox with minimal injection (no `Date`, `Math.random`, `require`, `import`, `process`, `globalThis`). Deterministic globals only: `issue()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget`, `list_artifacts()`, `get_artifact()`.
+- **Plan Runtime — Dry-run**: Symbolic execution with `dryRunStub` generating schema-based stubs; records estimated issue count, phases, token range.
+- **Plan Runtime — Crash Resume**: JSONL journal at `${SYMPHONY_DATA}/plan-runs/<id>/journal.jsonl` enables resume after process restart.
+- **HTTP API — Plan Runs**: `POST /plan-runs`, `GET /plan-runs`, `GET /plan-runs/:id`, `GET /plan-runs/:id/result` (long-poll), `POST /plan-runs/:id/approve`, `POST /plan-runs/:id/reject`, `POST /plan-runs/:id/request-changes`, `DELETE /plan-runs/:id`.
+- **Worker — Re-entry Prompt**: When a caller issue resumes after a plan run, the prompt injects `<previous_invocations>` (script excerpt, result, artifact index, scratchpad) and `<output_schema>`.
+- **SKILL.md**: New sections "Decomposing tasks with plans" and "Submitting results with emit_result"; updated tool list; troubleshooting for plan-run issues added to local-loop SKILL.md.
+
+### Removed
+- **MCP Tools — Retired**: `symphony.create_issue`, `symphony.activate_issue`, `symphony.submit_plan`. Issue creation is now via HTTP or plan executor only. Calling these tools returns a scope error.
+- **Planning Mode**: Issue `planning` and `plan_review` states removed. `agent.planning` config key deprecated (ignored). `POST /issues/:id/approve-plan` and `/revise-plan` routes removed. Slash commands `/revise` and `/skip-plan` removed.
+- **Worker**: `planningPrefix` and `plan_revision` prompt injection removed.
+
+### Added (previous)
 - **Permissions**: `agent.permission_auto` now supports `allow_rules`, `denial_max_consecutive`, and `denial_max_total` (strictly validated). `allow_rules` is the only trust declaration entrypoint exposed by symphony.
 - **Binary Result Delivery**: nano-agent binary sessions report results via `.nano.yaml.hooks.Stop` to a workspace-scoped `result-hook.sh`, which POSTs to `POST /agent-result` (no stdout sentinel parsing).
 - **Sandbox**: Spawner injects `sandbox.denied_write_paths: ["~/.config/nano"]` for native sandbox backends to prevent user config layer writes.

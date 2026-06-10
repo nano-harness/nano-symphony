@@ -41,31 +41,31 @@ describe("POST /issues — agent overrides", () => {
 
   test("null agent_kind clears override", async () => {
     const { app, tracker } = mkApp();
-    await app.request("/issues", {
+    const created = await app.request("/issues", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: "ix", title: "t", state: "todo", agent_kind: "claude-code",
-      }),
+      body: JSON.stringify({ title: "t", state: "todo", agent_kind: "claude-code" }),
     });
-    const r = await app.request("/issues/ix", {
+    const { uuid } = await created.json() as { uuid: string };
+    const r = await app.request(`/issues/${uuid}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent_kind: null }),
     });
     expect(r.status).toBe(200);
-    const got = tracker.getIssue("ix")!;
+    const got = tracker.getIssue(uuid)!;
     expect(got.agent_kind).toBeNull();
   });
 
   test("PUT .strict() still rejects unknown fields", async () => {
     const { app } = mkApp();
-    await app.request("/issues", {
+    const created = await app.request("/issues", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: "iy", title: "t", state: "todo" }),
+      body: JSON.stringify({ title: "t", state: "todo" }),
     });
-    const r = await app.request("/issues/iy", {
+    const { uuid } = await created.json() as { uuid: string };
+    const r = await app.request(`/issues/${uuid}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent_model: "opus" }),

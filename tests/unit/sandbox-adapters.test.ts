@@ -28,7 +28,7 @@ describe("claude-code adapter settings", () => {
     await fs.chmod(binary, 0o755);
 
     await spawnAgent({
-      issueId: "claude-settings-1",
+      issueUuid: "claude-settings-1",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -64,7 +64,7 @@ describe("claude-code adapter settings", () => {
     await fs.chmod(binary, 0o755);
 
     await spawnAgent({
-      issueId: "claude-settings-2",
+      issueUuid: "claude-settings-2",
       attempt: 0,
       workspace,
       prompt: "test",

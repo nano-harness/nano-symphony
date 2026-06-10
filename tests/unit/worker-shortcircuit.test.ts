@@ -20,7 +20,7 @@ describe("worker short-circuit", () => {
   });
 
   test("same fingerprint two attempts -> shortcircuit to blocked", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     // Simulate attempt 0 with fingerprint
     tracker.updateLastBlockerFingerprint("1", "sandbox_denied:/etc/passwd");
@@ -52,7 +52,7 @@ describe("worker short-circuit", () => {
   });
 
   test("different fingerprints allow retry", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     // Initialize symphony_runs by claiming the issue
     tracker.claimIssue("1", 0);
@@ -80,7 +80,7 @@ describe("worker short-circuit", () => {
   });
 
   test("success clears prev fingerprint", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     // Set fingerprint from previous failure
     tracker.updateLastBlockerFingerprint("1", "previous_error");
@@ -92,7 +92,7 @@ describe("worker short-circuit", () => {
   });
 
   test("handoff clears prev fingerprint", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     tracker.updateLastBlockerFingerprint("1", "previous_error");
 
@@ -102,7 +102,7 @@ describe("worker short-circuit", () => {
   });
 
   test("short-circuit only triggers at attempt >= 1", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     // Attempt 0 - no previous fingerprint, should allow retry
     const currentFingerprint = "error_A";
@@ -124,7 +124,7 @@ describe("worker short-circuit", () => {
   });
 
   test("empty fingerprint does not trigger short-circuit", () => {
-    tracker.insertIssue({ id: "1", identifier: "TASK-1", title: "Test", state: "todo" });
+    tracker.insertIssue({ uuid: "1", title: "Test", state: "todo" });
 
     tracker.updateLastBlockerFingerprint("1", "");
 

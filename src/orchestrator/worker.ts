@@ -8,6 +8,7 @@ import type { SpawnResult } from "../spawner/index.ts";
 import { calculateBackoff } from "./backoff.ts";
 import { appendRunLog } from "./run_log.ts";
 import type { Logger } from "pino";
+import { resolveAgent } from "../agent-resolution.ts";
 import type { AgentResultSummary } from "../spawner/agent-result-payload.ts";
 
 export interface WorkerContext {
@@ -130,7 +131,7 @@ export function deriveCompletion(
   };
 }
 
-export async function runWorker(issueId: string, attempt: number, ctx: WorkerContext): Promise<void> {
+export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerContext): Promise<void> {
   const { tracker, workflow, logger, mcpUrl } = ctx;
   const spawn = ctx.spawn ?? spawnAgent;
   const startedAt = new Date().toISOString();
@@ -146,18 +147,18 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
   try {
     // Claim happens in orchestrator tick for race-condition safety.
     // If called directly (e.g. in tests), attempt claim here as fallback.
-    const existingRun = tracker.getRun(issueId);
+    const existingRun = tracker.getRun(issueUuid);
     if (!existingRun || existingRun.last_state !== "claimed") {
-      const claimed = tracker.claimIssue(issueId, attempt);
+      const claimed = tracker.claimIssue(issueUuid, attempt);
       if (!claimed) {
-        logger.debug({ issueId }, "Failed to claim issue");
+        logger.debug({ issueUuid }, "Failed to claim issue");
         return;
       }
     }
 
-    const issue = tracker.getIssue(issueId);
+    const issue = tracker.getIssue(issueUuid);
     if (!issue) {
-      tracker.releaseIssue(issueId, "released");
+      tracker.releaseIssue(issueUuid, "released");
       return;
     }
 
@@ -167,11 +168,11 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
     workflow.workflow.workspace?.root,
     workflow.workflow.workspace?.git_baseline ?? true,
   );
-  tracker.updateWorkspacePath(issueId, wsPath, managed);
+  tracker.updateWorkspacePath(issueUuid, wsPath, managed);
 
   const hooks = workflow.workflow.workspace?.hooks;
   const hookEnv: Record<string, string> = {
-    SYMPHONY_ISSUE_ID: issueId,
+    SYMPHONY_ISSUE_UUID: issueUuid,
     SYMPHONY_WORKSPACE: wsPath,
     SYMPHONY_WORKSPACE_MANAGED: managed ? "1" : "0",
     SYMPHONY_IDENTIFIER: issue.identifier,
@@ -185,75 +186,73 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       await runHook(hooks.before_run, hookEnv);
     }
   } catch (err) {
-    logger.error({ err, issueId }, "Hook failed");
-    tracker.recordEvent(issueId, "error", `Hook failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger.error({ err, issueUuid }, "Hook failed");
+    tracker.recordEvent(issueUuid, "error", `Hook failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   let prompt: string;
   try {
-    // Determine if we're in planning phase
-    const planningConfig = workflow.workflow.agent?.planning;
-    const isInPlanningPhase = issue.state === "planning";
-
-    // Choose template: use planning template if provided and in planning phase
-    const templateToUse = isInPlanningPhase && planningConfig?.template
-      ? planningConfig.template
-      : workflow.template;
-
-    const result = await renderPrompt(templateToUse, { issue, attempt }, {
-      goal: isInPlanningPhase ? undefined : workflow.workflow.goal,
+    const result = await renderPrompt(workflow.template, { issue, attempt }, {
+      goal: workflow.workflow.goal,
       tracker,
-      issueId,
+      issueUuid,
     });
     prompt = result.text;
 
-    // Inject planning prompt prefix if in planning phase
-    if (isInPlanningPhase) {
-      const planningPrefix =
-        `You are in PLANNING mode. Your task is to analyze the issue and produce an ` +
-        `implementation plan. Do NOT write code or make changes.\n\n` +
-        `Output your plan by calling the \`symphony.submit_plan\` MCP tool.\n\n` +
-        `Your plan should include:\n` +
-        `- What files need to be created/modified\n` +
-        `- The approach and key design decisions\n` +
-        `- Step-by-step breakdown\n` +
-        `- Any risks or open questions\n\n`;
-      prompt = planningPrefix + prompt;
+    // Inject previous_invocations context for re-scheduled issues (plan handoff resume)
+    const resumeEvent = tracker.getLatestEventByKind(issueUuid, "caller_resumed");
+    if (resumeEvent) {
+      const planRunsByCaller = tracker.listPlanRunsByCaller(issueUuid);
+      if (planRunsByCaller.length > 0) {
+        const MAX_INVOCATIONS_BYTES = 32_768;
+        let xmlBlocks = planRunsByCaller.map((run, idx) => {
+          const scriptExcerpt = run.script.slice(0, 200 * 80);
+          return `<plan_run index="${idx}" id="${run.id}" state="${run.state}">\n` +
+            `<script_excerpt><![CDATA[${scriptExcerpt}]]></script_excerpt>\n` +
+            (run.result ? `<result><![CDATA[${run.result}]]></result>\n` : "") +
+            `</plan_run>`;
+        });
 
-      // Inject plan revision feedback if this is a revision
-      const revisionEvent = tracker.getLatestEventByKind(issueId, "plan_revision_requested");
-      const lastPlanEvent = tracker.getLatestEventByKind(issueId, "plan_submitted");
-      if (revisionEvent && (!lastPlanEvent || revisionEvent.ts > lastPlanEvent.ts)) {
-        const revPayload = JSON.parse(revisionEvent.payload_json ?? "{}") as { note?: string };
-        if (revPayload.note) {
-          prompt = `Operator requested plan revision:\n${revPayload.note}\n\nAddress this feedback in your revised plan.\n\n` + prompt;
+        // Truncate oldest if total size exceeds limit
+        let totalBytes = xmlBlocks.reduce((s, b) => s + b.length, 0);
+        let elided = 0;
+        while (totalBytes > MAX_INVOCATIONS_BYTES && xmlBlocks.length > 1) {
+          xmlBlocks.shift();
+          elided++;
+          totalBytes = xmlBlocks.reduce((s, b) => s + b.length, 0);
         }
+
+        const elidedNote = elided > 0 ? `<elided_older_invocations count="${elided}" />\n` : "";
+        const invocationsXml =
+          `\n<previous_invocations>\n${elidedNote}${xmlBlocks.join("\n")}\n</previous_invocations>` +
+          `\n<current_invocation>This issue was re-scheduled after a plan run completed. ` +
+          `Review the plan results above and continue or emit your final result.</current_invocation>`;
+
+        prompt = prompt + invocationsXml;
       }
     }
 
-    // Inject approved plan into execution prompt if transitioning from plan_review
-    if (!isInPlanningPhase) {
-      const approvedPlanEvent = tracker.getLatestEventByKind(issueId, "plan_approved");
-      const latestPlanEvent = tracker.getLatestEventByKind(issueId, "plan_submitted");
-      if (approvedPlanEvent && latestPlanEvent) {
-        try {
-          const planPayload = JSON.parse(latestPlanEvent.payload_json ?? "{}") as { markdown?: string };
-          if (planPayload.markdown) {
-            const executionPrefix =
-              `## Approved Implementation Plan\n\n${planPayload.markdown}\n\n---\n\n` +
-              `Execute this plan. Follow the steps above. If you encounter issues that ` +
-              `require deviating from the plan, document the deviation.\n\n`;
-            prompt = executionPrefix + prompt;
-          }
-        } catch {
-          // ignore malformed plan payload
-        }
-      }
+    // Inject output schema hint if the issue has an expected_schema
+    if (issue.expected_schema) {
+      const schemaHint =
+        `\n<output_schema>\nCall symphony.emit_result({ data }) before symphony.session_completed. ` +
+        `Your data must conform to this JSON Schema:\n${issue.expected_schema}\n</output_schema>`;
+      prompt = prompt + schemaHint;
+    } else {
+      const resultHint =
+        `\n<output_schema>\nCall symphony.emit_result({ data: "your summary here" }) ` +
+        `before symphony.session_completed. Provide a concise string summary of what you accomplished (≤32KB).\n</output_schema>`;
+      prompt = prompt + resultHint;
+    }
+
+    // Inject scratchpad if present
+    if (issue.scratchpad) {
+      prompt = prompt + `\n<scratchpad>\n${issue.scratchpad}\n</scratchpad>`;
     }
 
     // Record comments_injected event if comments were included
     if (result.meta.commentIds.length > 0) {
-      tracker.recordEvent(issueId, "comments_injected", `${result.meta.commentIds.length} comments injected into prompt`, {
+      tracker.recordEvent(issueUuid, "comments_injected", `${result.meta.commentIds.length} comments injected into prompt`, {
         attempt,
         comment_ids: result.meta.commentIds,
         count: result.meta.commentIds.length,
@@ -261,50 +260,48 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       });
     }
   } catch (err) {
-    logger.error({ err, issueId }, "Failed to render prompt");
+    logger.error({ err, issueUuid }, "Failed to render prompt");
     // Permanent failure (likely template typo). Record so operators see it in
     // /api/v1/events instead of only pino logs.
     const message = err instanceof Error ? err.message : String(err);
-    tracker.recordEvent(issueId, "error", `Failed to render prompt: ${message}`, {
+    tracker.recordEvent(issueUuid, "error", `Failed to render prompt: ${message}`, {
       stage: "render_prompt",
       error: message,
     });
-    tracker.releaseIssue(issueId, "released");
+    tracker.releaseIssue(issueUuid, "released");
     // Sync last_issue_state so the candidate SQL doesn't re-pick this issue
     // every tick. Operator must change issues.state to retry.
-    tracker.updateLastIssueState(issueId, issue.state);
+    tracker.updateLastIssueState(issueUuid, issue.state);
     return;
   }
+
+  // Resolve agent config before token TTL calculation
+  const agentConfig = workflow.workflow.agent;
+  const resolved = resolveAgent(
+    { kind: issue.agent_kind ?? undefined, binary: issue.agent_binary ?? undefined },
+    { kind: agentConfig?.kind, binary: agentConfig?.binary, timeoutMs: agentConfig?.timeout_ms, maxRetries: agentConfig?.max_retries }
+  );
+  const agentKind = resolved.kind;
+  const binary = resolved.binary;
+  const baseTimeoutMs = resolved.timeoutMs;
+  const maxRetries = resolved.maxRetries;
 
   // S6: Issue agent token scoped to reporting-only tools (AGENT_TOOL_SCOPE).
   // S7: Extend TTL to cover the full agent timeout plus a 10-minute buffer so
   //     tokens don't expire mid-session. Use config timeout as a fallback.
-  const isInPlanningPhase = issue.state === "planning";
-  const planningConfig = workflow.workflow.agent?.planning;
-  const DEFAULT_PLANNING_TIMEOUT_MS = 300_000; // 5 minutes for planning phase (shorter than execution)
-  const baseTimeoutMs = (workflow.workflow.agent?.timeout_ms ?? 3_600_000);
-  const timeoutMs = isInPlanningPhase
-    ? (planningConfig?.planning_timeout_ms ?? DEFAULT_PLANNING_TIMEOUT_MS)
-    : baseTimeoutMs;
-  const tokenTtlMs = timeoutMs + 10 * 60 * 1000; // timeout + 10min buffer
-  const token = issueToken(issueId, attempt, AGENT_TOOL_SCOPE, tokenTtlMs);
+  const tokenTtlMs = baseTimeoutMs + 10 * 60 * 1000; // timeout + 10min buffer
+  const token = issueToken(issueUuid, attempt, AGENT_TOOL_SCOPE, tokenTtlMs);
 
   // Mark current attempt before spawning agent so frontend can subscribe to correct log
-  tracker.markCurrentAttempt(issueId, attempt);
+  tracker.markCurrentAttempt(issueUuid, attempt);
 
   // Record prompt summary for debugging
-  tracker.recordEvent(issueId, "prompt_rendered", `Prompt rendered (${prompt.length} chars): ${prompt.slice(0, 200)}…`, {
+  tracker.recordEvent(issueUuid, "prompt_rendered", `Prompt rendered (${prompt.length} chars): ${prompt.slice(0, 200)}…`, {
     attempt,
     prompt_length: prompt.length,
   });
 
-  const agentConfig = workflow.workflow.agent;
-  const agentKind: "nano" | "claude-code" =
-    issue.agent_kind ?? agentConfig?.kind ?? "nano";
-  const AGENT_KIND_BINARY_DEFAULTS: Record<string, string> = { "claude-code": "claude", "nano": "nano" };
-  const binary = agentConfig?.binary ?? AGENT_KIND_BINARY_DEFAULTS[agentKind] ?? "nano";
-
-  tracker.recordEvent(issueId, "started", `Attempt ${attempt} started`, {
+  tracker.recordEvent(issueUuid, "started", `Attempt ${attempt} started`, {
     attempt,
     agent_kind: agentKind,
     agent_binary: binary,
@@ -312,41 +309,59 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
   });
 
   let spawnResult: SpawnResult | null = null;
+  let accTokenInput = 0;
+  let accTokenOutput = 0;
   try {
     spawnResult = await spawn({
-      issueId,
+      issueUuid,
       attempt,
       workspace: wsPath,
       prompt,
       token,
       mcpUrl,
       binary,
-      timeoutMs,
+      timeoutMs: baseTimeoutMs,
       agentKind,
       extraEnv: agentConfig?.extra_env,
+      agentConfig: {
+        permission_mode: agentConfig?.permission_mode,
+        permissions: agentConfig?.permissions,
+        sandbox: agentConfig?.sandbox,
+        trusted_binaries: agentConfig?.trusted_binaries,
+        hooks: agentConfig?.hooks,
+      },
       logger,
       onStreamEvent: (ev) => {
-        tracker.recordEvent(issueId, ev.kind, ev.message, ev.payload);
+        if (ev.kind === "token_stats") {
+          if (ev.payload) {
+            const p = ev.payload as Record<string, unknown>;
+            accTokenInput += Number(p.input ?? 0);
+            accTokenOutput += Number(p.output ?? 0);
+          }
+          return; // 不写入 DB
+        }
+        if (ev.kind === "assistant_chunk") return; // 不写入 DB
+        tracker.recordEvent(issueUuid, ev.kind, ev.message, ev.payload);
       },
       // S9: Persist the agent PID so crash-restart can kill orphaned processes.
       onPidAssigned: (pid) => {
-        tracker.updateAgentPid(issueId, pid);
+        tracker.updateAgentPid(issueUuid, pid);
       },
     });
   } catch (err) {
-    logger.error({ err, issueId }, "Agent spawn error");
-    tracker.recordEvent(issueId, "error", `Agent error: ${err instanceof Error ? err.message : String(err)}`);
+    logger.error({ err, issueUuid }, "Agent spawn error");
+    tracker.recordEvent(issueUuid, "error", `Agent error: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     // S9: Clear persisted PID — process has exited (or failed to start).
-    tracker.updateAgentPid(issueId, null);
+    tracker.updateAgentPid(issueUuid, null);
   }
 
   const resultPayload: AgentResultSummary | null = spawnResult?.agentResult ?? null;
 
   const patch = spawnResult?.artifacts?.patch ?? null;
   if (patch) {
-    tracker.recordPatch(issueId, attempt, patch);
-    tracker.recordEvent(issueId, "patch_collected", `patch length: ${patch.length}`, {
+    tracker.recordPatch(issueUuid, attempt, patch);
+    tracker.recordEvent(issueUuid, "patch_collected", `patch length: ${patch.length}`, {
       bytes: patch.length,
     });
   }
@@ -356,32 +371,33 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
       await runHook(hooks.after_run, hookEnv);
     }
   } catch (err) {
-    logger.warn({ err, issueId }, "after_run hook failed");
+    logger.warn({ err, issueUuid }, "after_run hook failed");
   }
 
   // Non-blocking artifact collection
   try {
     const { collectAllArtifacts } = await import("./artifact-collector.ts");
-    const collected = await collectAllArtifacts({ issueId, attempt, workspacePath: wsPath, tracker });
+    const collected = await collectAllArtifacts({ issueUuid, attempt, workspacePath: wsPath, tracker });
     if (collected > 0) {
-      tracker.recordEvent(issueId, "artifacts_collected", `Collected ${collected} artifact(s)`, { count: collected, attempt });
+      tracker.recordEvent(issueUuid, "artifacts_collected", `Collected ${collected} artifact(s)`, { count: collected, attempt });
     }
   } catch (err) {
-    logger.warn({ err, issueId }, "Artifact collection failed (non-fatal)");
+    logger.warn({ err, issueUuid }, "Artifact collection failed (non-fatal)");
   }
 
-  const { semantics: derivedSemantics, summary, blockerFingerprint: derivedFingerprint, terminationCause } =
+  const { semantics: derivedSemantics, summary: derivedSummary, blockerFingerprint: derivedFingerprint, terminationCause } =
     deriveCompletion(spawnResult, resultPayload);
 
   let semantics = derivedSemantics;
   let blockerFingerprint = derivedFingerprint;
+  let summary = derivedSummary;
 
   // Override semantics from session_completed MCP tool call if present.
   // S4: Before accepting the override, validate that it is consistent with the
   // process outcome to prevent agents from claiming success after a non-zero exit.
   // Neutral intents (handoff, needs_retry) are accepted unconditionally.
   // Reporting success requires either a zero exit code or an absent exit code.
-  const sessionCompletedEvent = tracker.getLatestEventByKind(issueId, "session_completed");
+  const sessionCompletedEvent = tracker.getLatestEventByKind(issueUuid, "session_completed");
   if (sessionCompletedEvent?.payload_json) {
     try {
       const scPayload = JSON.parse(sessionCompletedEvent.payload_json);
@@ -392,13 +408,18 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
         // Reject "success" claim when process exited non-zero (agent crash/error).
         if (proposedSemantics === "success" && isNonZeroExit) {
-          tracker.recordEvent(issueId, "semantics_override_rejected",
+          tracker.recordEvent(issueUuid, "semantics_override_rejected",
             `session_completed claimed success but process exited with code ${exitCode}; using derived semantics`,
             { proposed: proposedSemantics, derived: semantics, exit_code: exitCode, attempt }
           );
           // Keep derived semantics — do not apply the override.
         } else {
           semantics = proposedSemantics;
+          if (scPayload.summary) {
+            summary = scPayload.summary;
+          } else if (terminationCause === "no_result_payload") {
+            summary = undefined;
+          }
           if (scPayload.blocker_fingerprint) {
             blockerFingerprint = scPayload.blocker_fingerprint;
           }
@@ -409,8 +430,26 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
     }
   }
 
-	  if (terminationCause === "no_result_payload") {
-	    tracker.recordEvent(issueId, "no_result_payload", summary ?? "no result payload", { attempt });
+  // Fallback: if agent called emit_result (validated=1) but never called session_completed,
+  // treat as success to avoid abandoned → cancelled waste.
+  if (semantics === "abandoned" && terminationCause === "no_result_payload" && !sessionCompletedEvent) {
+    const resultEmittedEvent = tracker.getLatestEventByKind(issueUuid, "result_emitted");
+    if (resultEmittedEvent?.payload_json) {
+      try {
+        const rePayload = JSON.parse(resultEmittedEvent.payload_json);
+        if (rePayload.validated === 1 || rePayload.validated === true) {
+          semantics = "success";
+          summary = undefined;
+          tracker.recordEvent(issueUuid, "semantics_fallback_result_emitted",
+            "No session_completed but result_emitted with validated=1; treating as success",
+            { attempt });
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+	  if (terminationCause === "no_result_payload" && semantics !== "success") {
+	    tracker.recordEvent(issueUuid, "no_result_payload", summary ?? "no result payload", { attempt });
 	  }
 
 	  // Capture for run log
@@ -420,7 +459,7 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
 	  // Record goal_state_observed event if payload contains goal_state
 	  if (resultPayload?.goal_state) {
-	    tracker.recordEvent(issueId, "goal_state_observed",
+	    tracker.recordEvent(issueUuid, "goal_state_observed",
 	      resultPayload.goal_state.last_reason ?? "(no reason)",
 	      resultPayload.goal_state);
 	  }
@@ -429,16 +468,22 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 	  if (resultPayload?.tokens) {
 	    const { input, output } = resultPayload.tokens;
 	    if (input != null && output != null) {
-	      tracker.updateTokenStats(issueId, input, output, input + output);
+	      tracker.updateTokenStats(issueUuid, input, output, input + output);
 	      finalTokens = { input, output, total: input + output };
 	    }
+	  }
+
+	  // Fallback: if payload has no tokens but streaming accumulated them, use accumulator.
+	  if (!finalTokens && (accTokenInput > 0 || accTokenOutput > 0)) {
+	    tracker.updateTokenStats(issueUuid, accTokenInput, accTokenOutput, accTokenInput + accTokenOutput);
+	    finalTokens = { input: accTokenInput, output: accTokenOutput, total: accTokenInput + accTokenOutput };
 	  }
 
 	  // Record sandbox_observed event if payload contains sandbox metadata
 	  if (resultPayload?.sandbox) {
 	    const sandboxInfo = resultPayload.sandbox;
 	    tracker.recordEvent(
-	      issueId,
+	      issueUuid,
 	      "sandbox_observed",
 	      `${sandboxInfo.backend ?? "unknown"}`,
 	      sandboxInfo
@@ -447,7 +492,7 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
 	  // Record blocked_commands_sample event if agent reported blocked commands
 	  if (resultPayload?.blocked_commands_sample?.length) {
-	    tracker.recordEvent(issueId, "agent_blocked_commands",
+	    tracker.recordEvent(issueUuid, "agent_blocked_commands",
 	      `Agent blocked on ${resultPayload.blocked_commands_sample.length} command(s): ${resultPayload.blocked_commands_sample.slice(0, 3).join(", ")}`,
 	      { commands: resultPayload.blocked_commands_sample, attempt });
 	  }
@@ -455,11 +500,32 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 	  const retryConfig = workflow.workflow.retry;
   const base = retryConfig?.base_delay_ms ?? 5_000;
   const maxBackoff = retryConfig?.max_delay_ms ?? 300_000;
-  const maxRetries = agentConfig?.max_retries ?? 3;
 
   // State transition logic
   const transitions = workflow.workflow.state_transitions ?? {};
   let targetState: string | null = (transitions as Record<string, string | null>)[semantics] ?? null;
+
+  // Planning guard: if issue was in planning state but agent never submitted a plan,
+  // override semantics to needs_retry so the issue gets re-scheduled for planning.
+  if (issue.state === "planning") {
+    const planSubmitted = tracker.getLatestEventByKind(issueUuid, "plan_submitted");
+    if (!planSubmitted && semantics === "success") {
+      semantics = "needs_retry";
+      summary = "Agent completed without submitting a plan — retrying planning";
+      blockerFingerprint = "planning_no_plan_submitted";
+      targetState = null; // Keep in planning state for retry
+      tracker.recordEvent(issueUuid, "planning_guard", summary, { attempt });
+    }
+  }
+
+  // Plan review guard: if agent submitted a plan during this run, the state is now plan_review.
+  // Do not transition away from plan_review — let the UI control it.
+  const currentIssue = tracker.getIssue(issueUuid);
+  if (currentIssue && currentIssue.state === "plan_review") {
+    semantics = "handoff";
+    targetState = "plan_review";
+    summary = summary ?? "Plan submitted for review";
+  }
 
   // Wrap all state transition writes in a transaction to ensure atomicity.
   // If any write fails, all are rolled back — prevents partial state (e.g.
@@ -468,42 +534,43 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 	  // 关键顺序：先 updateIssueState（改 issues.state），再 updateLastIssueState（同步到新值）
 	  // 否则 last_issue_state(旧) != issues.state(新)，会被 candidate SQL 重新拾起
 	  if (targetState && targetState !== issue.state) {
-	    tracker.updateIssueState(issueId, targetState);
+	    tracker.updateIssueState(issueUuid, targetState);
     }
     const finalState = targetState ?? issue.state;
 
     if (semantics === "success") {
-      tracker.updateLastBlockerFingerprint(issueId, null);
-      tracker.releaseIssue(issueId, "released");
-      tracker.updateLastIssueState(issueId, finalState);
+      tracker.updateLastBlockerFingerprint(issueUuid, null);
+      tracker.releaseIssue(issueUuid, "released");
+      tracker.updateLastIssueState(issueUuid, finalState);
       finalTargetState = finalState;
-      tracker.recordEvent(issueId, "completed", summary ?? "Agent completed successfully", { target_state: finalState });
+      tracker.recordEvent(issueUuid, "completed", summary ?? "Agent completed successfully", { target_state: finalState });
 	  } else if (semantics === "handoff") {
-	    tracker.updateLastBlockerFingerprint(issueId, null);
-	    tracker.releaseIssue(issueId, finalState);
-	    tracker.updateLastIssueState(issueId, finalState);
+	    tracker.updateLastBlockerFingerprint(issueUuid, null);
+	    tracker.releaseIssue(issueUuid, finalState);
+	    tracker.updateLastIssueState(issueUuid, finalState);
 	    finalTargetState = finalState;
-	    tracker.recordEvent(issueId, "handoff", summary ?? "Agent handed off", { target_state: finalState });
+	    tracker.recordEvent(issueUuid, "handoff", summary ?? "Agent handed off", { target_state: finalState });
 	  } else if (semantics === "needs_retry" && attempt < maxRetries) {
 	    // Same-cause short-circuit: if same fingerprint repeats and we've seen it before, skip retry
 	    const currentFingerprint = blockerFingerprint ?? "";
-	    const prevFingerprint = tracker.getLastBlockerFingerprint(issueId);
+	    const prevFingerprint = tracker.getLastBlockerFingerprint(issueUuid);
 
       if (currentFingerprint && currentFingerprint === prevFingerprint && attempt >= 1) {
         // Short-circuit to blocked state
-        const blockedState = (transitions as Record<string, string | null>)["blocked"]
-          ?? (transitions as Record<string, string | null>)["abandoned"]
+        const blockedState = transitions.blocked
+          ?? transitions.abandoned
           ?? "blocked";
 
         if (blockedState !== issue.state) {
-          tracker.updateIssueState(issueId, blockedState);
+          tracker.updateIssueState(issueUuid, blockedState);
         }
 
-        tracker.releaseIssue(issueId, "released");
-        tracker.updateLastIssueState(issueId, blockedState);
+        tracker.releaseIssue(issueUuid, "released");
+        tracker.updateLastIssueState(issueUuid, blockedState);
         finalTargetState = blockedState;
         finalSemantics = "abandoned"; // Short-circuit is effectively abandoned
-        tracker.recordEvent(issueId, "shortcircuit_same_cause",
+        finalTerminationCause = "shortcircuit_same_cause";
+        tracker.recordEvent(issueUuid, "shortcircuit_same_cause",
           `Same blocker repeated across attempts ${attempt} and ${attempt + 1}: ${currentFingerprint}`,
           { fingerprint: currentFingerprint, attempt, prev_attempt: attempt });
       } else {
@@ -513,45 +580,52 @@ export async function runWorker(issueId: string, attempt: number, ctx: WorkerCon
 
         // Persist fingerprint for next attempt comparison
         if (currentFingerprint) {
-          tracker.updateLastBlockerFingerprint(issueId, currentFingerprint);
+          tracker.updateLastBlockerFingerprint(issueUuid, currentFingerprint);
         }
 
-        tracker.scheduleRetry(issueId, nextDue, attempt + 1);
+        tracker.scheduleRetry(issueUuid, nextDue, attempt + 1);
         finalTargetState = issue.state; // State doesn't change on retry
-        tracker.recordEvent(issueId, "retry_scheduled", `Retry scheduled in ${delay}ms`, { delay, attempt: attempt + 1 });
+        tracker.recordEvent(issueUuid, "retry_scheduled", `Retry scheduled in ${delay}ms`, { delay, attempt: attempt + 1 });
       }
 	  } else {
 	    // Abandoned or max retries exceeded
-	    tracker.releaseIssue(issueId, "released");
-	    tracker.updateLastIssueState(issueId, finalState);
+	    // Fallback: if needs_retry but no transition defined, map to abandoned → cancelled
+	    if (!targetState && semantics === "needs_retry") {
+	      targetState = (transitions as Record<string, string | null>)["abandoned"] ?? "cancelled";
+	      if (targetState !== issue.state) {
+	        tracker.updateIssueState(issueUuid, targetState);
+	      }
+	    }
+	    tracker.releaseIssue(issueUuid, "released");
+	    tracker.updateLastIssueState(issueUuid, finalState);
 	    finalTargetState = finalState;
-	    tracker.recordEvent(issueId, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
+	    tracker.recordEvent(issueUuid, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
 	  }
   });
 
   revokeToken(token);
 
-  logger.info({ issueId, semantics, attempt, agent_kind: agentKind }, "Worker completed");
+  logger.info({ issueUuid, semantics, attempt, agent_kind: agentKind }, "Worker completed");
   } finally {
     // Ensure issue is released if worker throws unexpectedly.
     // Normal completion paths already call releaseIssue inside the transaction.
-    const currentRun = tracker.getRun(issueId);
+    const currentRun = tracker.getRun(issueUuid);
     if (currentRun && currentRun.last_state === "claimed") {
-      tracker.releaseIssue(issueId, "released");
+      tracker.releaseIssue(issueUuid, "released");
     }
 
     // Always write run log, even if worker throws
     const finishedAt = new Date().toISOString();
     const durationMs = Date.now() - startTime;
-    const issue = tracker.getIssue(issueId);
+    const issue = tracker.getIssue(issueUuid);
 
     if (issue) {
       const success = finalSemantics === "success" || finalSemantics === "handoff";
-      const eventsUrl = `/api/v1/issues/${issueId}/events`;
+      const eventsUrl = `/api/v1/issues/${issueUuid}/events`;
 
       await appendRunLog({
         schema_version: 1,
-        issue_id: issueId,
+        issue_uuid: issueUuid,
         identifier: issue.identifier,
         attempt,
         started_at: startedAt,

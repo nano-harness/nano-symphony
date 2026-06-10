@@ -1415,7 +1415,7 @@ a:hover {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(6, minmax(220px, 1fr));
+  grid-template-columns: repeat(8, minmax(220px, 1fr));
   gap: 12px;
   overflow-x: auto;
   padding-bottom: 8px;
@@ -2182,3 +2182,87 @@ a:hover {
 .dashboard-section .artifacts-global-list {
   margin-top: 12px;
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Plan Run Panel
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.plan-run-card {
+  background: var(--ink-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.plan-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.plan-run-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--mute);
+  letter-spacing: 0.06em;
+}
+
+.plan-run-meta {
+  margin-bottom: 8px;
+}
+
+.plan-run-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--paper-dim);
+}
+
+.plan-run-summary,
+.plan-run-result {
+  margin-top: 8px;
+}
+
+.plan-run-summary details,
+.plan-run-result details {
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.plan-run-summary summary,
+.plan-run-result summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.plan-run-summary summary:hover,
+.plan-run-result summary:hover {
+  color: var(--ember);
+}
+
+.plan-run-pre {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--ink-3);
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  max-height: 300px;
+  overflow-y: auto;
+  color: var(--paper-dim);
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Plan run state pills */
+.pill.pending { border-color: var(--mute-2); color: var(--mute-2); }
+.pill.dry_running { border-color: var(--signal-blue); color: var(--signal-blue); }
+.pill.awaiting_approval { border-color: var(--ember); color: var(--ember); }
+.pill.running { border-color: var(--signal-green); color: var(--signal-green); }
+.pill.done { border-color: var(--signal-green); color: var(--signal-green); }
+.pill.failed { border-color: var(--signal-red); color: var(--signal-red); }
+.pill.cancelled { border-color: var(--signal-red); color: var(--signal-red); }

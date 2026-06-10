@@ -8,6 +8,7 @@ import { createRoutes } from "./routes.ts";
 import { createMcpRouter } from "../mcp/server.ts";
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
+import { FRONTEND_DIST } from "../paths.ts";
 
 /** Constant-time string comparison to prevent timing attacks. */
 function isTokenValid(provided: string, expected: string): boolean {
@@ -54,7 +55,7 @@ export function createHttpServer(
 
   app.route("/api/v1", createRoutes(tracker, getWorkflow, triggerTick, options));
 
-  const staticRoot = process.env.SYMPHONY_STATIC_ROOT ?? "./frontend/dist";
+  const staticRoot = FRONTEND_DIST;
   const indexPath = resolve(join(staticRoot, "index.html"));
   const distExists = existsSync(indexPath);
 
@@ -65,6 +66,7 @@ export function createHttpServer(
 
     // All other paths (including /): serve index.html with injected API token.
     app.get("*", async (c) => {
+      if (c.req.path.includes("/.well-known/")) return c.notFound();
       try {
         const html = await fs.readFile(indexPath, "utf-8");
         const injected = apiToken

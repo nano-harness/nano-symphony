@@ -125,7 +125,7 @@ describe("S2: Removed privileged API fields", () => {
     expect(create.status).toBe(201);
     const issue = await create.json();
 
-    const res = await app.request("/api/v1/issues/" + issue.id, {
+    const res = await app.request("/api/v1/issues/" + issue.uuid, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -148,7 +148,7 @@ describe("S2: Removed privileged API fields", () => {
     });
     const issue = await create.json();
 
-    const res = await app.request("/api/v1/issues/" + issue.id, {
+    const res = await app.request("/api/v1/issues/" + issue.uuid, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -171,7 +171,7 @@ describe("S2: Removed privileged API fields", () => {
     });
     const issue = await create.json();
 
-    const res = await app.request("/api/v1/issues/" + issue.id, {
+    const res = await app.request("/api/v1/issues/" + issue.uuid, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",

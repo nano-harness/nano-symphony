@@ -16,8 +16,7 @@ async function makeAppWithWorkspace(workspacePath: string) {
 
   const ISSUE_ID = "ws-test-1";
   tracker.insertIssue({
-    id: ISSUE_ID,
-    identifier: "WS-1",
+    uuid: ISSUE_ID,
     title: "Workspace test",
     priority: "medium",
     state: "todo",

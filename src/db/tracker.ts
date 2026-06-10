@@ -4,10 +4,14 @@ import { createRunOps } from "./tracker-runs.ts";
 import { createEventOps } from "./tracker-events.ts";
 import { createCommentOps } from "./tracker-comments.ts";
 import { createArtifactOps } from "./tracker-artifacts.ts";
+import { createPlanRunOps } from "./tracker-plan-runs.ts";
+import { createIssueResultOps } from "./tracker-issue-results.ts";
 
 // Re-export all types for backward compatibility
 export type { Issue, IssueInput, SymphonyRun, SymphonyEvent, Comment } from "./tracker-types.ts";
 export type { Artifact, ArtifactInput } from "./tracker-artifacts.ts";
+export type { PlanRun, PlanRunState, PlanRunApprovalStatus } from "./tracker-plan-runs.ts";
+export type { IssueResult } from "./tracker-issue-results.ts";
 
 export function createTracker(db: Database) {
   const issues = createIssueOps(db);
@@ -15,6 +19,8 @@ export function createTracker(db: Database) {
   const events = createEventOps(db);
   const comments = createCommentOps(db);
   const artifacts = createArtifactOps(db);
+  const planRuns = createPlanRunOps(db);
+  const issueResults = createIssueResultOps(db);
 
   /**
    * Wraps a synchronous function in a SQLite transaction.
@@ -32,6 +38,8 @@ export function createTracker(db: Database) {
     ...events,
     ...comments,
     ...artifacts,
+    ...planRuns,
+    ...issueResults,
     withTransaction,
   };
 }

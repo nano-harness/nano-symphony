@@ -29,7 +29,7 @@ describe("runWorker render failure handling", () => {
   test("records error event and syncs last_issue_state on render failure", async () => {
     const tracker = mkTracker();
     tracker.insertIssue({
-      id: "i1", identifier: "TEST-1", title: "t", state: "todo",
+      uuid: "i1", title: "t", state: "todo",
     });
 
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-workspaces-"));
@@ -47,7 +47,7 @@ describe("runWorker render failure handling", () => {
       mcpUrl: "http://localhost:0/mcp",
     });
 
-    const events = tracker.getEvents().filter((e) => e.issue_id === "i1");
+    const events = tracker.getEvents().filter((e) => e.issue_uuid === "i1");
     expect(events.some((e) => e.kind === "error")).toBe(true);
     const errorEvent = events.find((e) => e.kind === "error")!;
     expect(errorEvent.message).toContain("Failed to render prompt");
@@ -59,6 +59,6 @@ describe("runWorker render failure handling", () => {
 
     // Second tick: candidate query must NOT return this issue
     const candidates = tracker.getCandidates(10);
-    expect(candidates.find((c) => c.id === "i1")).toBeUndefined();
+    expect(candidates.find((c) => c.uuid === "i1")).toBeUndefined();
   });
 });

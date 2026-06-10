@@ -1,6 +1,6 @@
 import path from "path";
 import fs from "fs/promises";
-import type { SpawnContext } from "./types.ts";
+import type { SpawnContext, AgentAdapterConfig } from "./types.ts";
 import type { AgentResultSummary, AgentArtifacts } from "./agent-result-payload.ts";
 import { getAdapter, type AgentKind } from "./agent-adapter.ts";
 import { stripSymphonyInternals } from "./env.ts";
@@ -9,10 +9,13 @@ import { stripSymphonyInternals } from "./env.ts";
 import "./adapters/nano.ts";
 import "./adapters/claude-code.ts";
 
-export type { SpawnContext } from "./types.ts";
+// Track which adapters have been prepared (prepare() is idempotent but should only run once)
+const preparedAdapters = new Set<string>();
+
+export type { SpawnContext, AgentAdapterConfig } from "./types.ts";
 
 export interface SpawnOptions {
-  issueId: string;
+  issueUuid: string;
   attempt: number;
   workspace: string;
   prompt: string;
@@ -20,13 +23,18 @@ export interface SpawnOptions {
   mcpUrl: string;
   binary: string;
   timeoutMs: number;
-  agentKind?: AgentKind;
+  /** Agent kind for adapter selection. */
+  agentKind: AgentKind;
   logger?: { warn: (obj: unknown, msg: string) => void };
   onStreamEvent?: (event: { kind: string; message: string; payload?: Record<string, unknown> }) => void;
   // S9: Called with the spawned process PID so the caller can persist it for crash-restart cleanup.
   onPidAssigned?: (pid: number) => void;
+  // Heartbeat: track last heartbeat timestamp for liveness monitoring
+  onHeartbeat?: (ts: number) => void;
   /** Extra env vars forwarded verbatim to the agent process (from workflow agent.extra_env). */
   extraEnv?: Record<string, string>;
+  /** Agent-specific config (permissions, sandbox paths, etc.) derived from workflow agent section. */
+  agentConfig?: AgentAdapterConfig;
 }
 
 export interface SpawnResult {
@@ -48,16 +56,16 @@ export const NANO_EXIT = {
   UNCLASSIFIED: 1,
 } as const;
 
-// Map of issueId → active subprocess for cancel support
+// Map of issueUuid → active subprocess for cancel support
 const activeProcesses = new Map<string, { proc: ReturnType<typeof Bun.spawn>; kill: () => void }>();
 const SIGKILL_ESCALATION_MS = 3000;
 
 /**
- * Cancel a running agent by issueId. Sends SIGTERM, then SIGKILL after timeout.
+ * Cancel a running agent by issueUuid. Sends SIGTERM, then SIGKILL after timeout.
  * Returns true if a process was found and killed, false otherwise.
  */
-export function cancelAgent(issueId: string): boolean {
-  const entry = activeProcesses.get(issueId);
+export function cancelAgent(issueUuid: string): boolean {
+  const entry = activeProcesses.get(issueUuid);
   if (!entry) return false;
   entry.kill();
   return true;
@@ -76,25 +84,30 @@ export function killAllAgents(): void {
 }
 
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  const { issueId, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, logger, onStreamEvent, onPidAssigned } = opts;
-  const agentKind: AgentKind = opts.agentKind ?? "nano";
+  const { issueUuid, attempt, workspace, prompt, token, mcpUrl, binary, timeoutMs, logger, onStreamEvent, onPidAssigned, onHeartbeat } = opts;
+  const agentKind: AgentKind = opts.agentKind ?? "claude-code";
   const adapter = getAdapter(agentKind);
+
+  // One-time adapter preparation (e.g. binary check, cache warm-up)
+  if (adapter.prepare && !preparedAdapters.has(agentKind)) {
+    preparedAdapters.add(agentKind);
+    await adapter.prepare();
+  }
 
   const outputDir = path.join(workspace, ".nano-out");
   await fs.mkdir(outputDir, { recursive: true });
 
   const ctx: SpawnContext = {
-    issueId,
+    issueUuid,
     attempt,
     workspace,
     prompt,
     token,
     mcpUrl,
-    binary,
-    timeoutMs,
     outputDir,
     extraEnv: opts.extraEnv,
     logger,
+    config: opts.agentConfig ?? {},
   };
 
   // Write workspace files produced by the adapter
@@ -112,11 +125,16 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Build spawn invocation from adapter
   const invocation = adapter.buildSpawnInvocation(ctx);
 
+  // S10: Spawner injects binary at argv[0] so all adapters are consistent
+  const argv = [opts.binary, ...invocation.argv];
+
   // Env: start from user's full environment minus symphony's own service credentials,
   // then merge adapter-specific vars (MCP URL, token, etc.) and workflow extra_env.
   const env: Record<string, string> = {
     ...stripSymphonyInternals(process.env),
     ...invocation.env,
+    SYMPHONY_MCP_URL: opts.mcpUrl,
+    SYMPHONY_TOKEN: opts.token,
     ...(opts.extraEnv ?? {}),
   };
 
@@ -124,7 +142,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   let killedByTimeout = false;
 
   // Use pipes to capture stdout/stderr
-  const proc = Bun.spawn(invocation.argv, {
+  const proc = Bun.spawn(argv, {
     cwd: workspace,
     env,
     stdin: "pipe",
@@ -137,17 +155,47 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const KILL_SIGNALS = new Set(["SIGTERM", "SIGKILL"]);
   const killProcessTree = (pid: number, signal: string) => {
     if (!KILL_SIGNALS.has(signal)) return;
-    try { Bun.spawnSync(["pkill", `-${signal}`, "-P", String(pid)]); } catch { /* best-effort */ }
-    try { process.kill(pid, signal as NodeJS.Signals); } catch { /* already dead */ }
+    if (process.platform === "darwin") {
+      // macOS: pkill -P only kills direct children. Use a recursive approach
+      // to find and kill the entire process subtree via pgrep + recursive kill.
+      const killDescendants = (parentPid: number) => {
+        try {
+          const result = Bun.spawnSync(["pgrep", "-P", String(parentPid)]);
+          const output = result.stdout.toString().trim();
+          if (output) {
+            for (const childPid of output.split("\n").map(Number).filter(Boolean)) {
+              killDescendants(childPid);
+            }
+          }
+        } catch { /* best-effort */ }
+        try { process.kill(parentPid, signal as NodeJS.Signals); } catch { /* already dead */ }
+      };
+      killDescendants(pid);
+    } else {
+      // Linux: pkill -P reliably kills the process group children
+      try { Bun.spawnSync(["pkill", `-${signal}`, "-P", String(pid)]); } catch { /* best-effort */ }
+      try { process.kill(pid, signal as NodeJS.Signals); } catch { /* already dead */ }
+    }
   };
   const killFn = () => {
     const pid = proc.pid;
     killProcessTree(pid, "SIGTERM");
     killTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), SIGKILL_ESCALATION_MS);
   };
-  activeProcesses.set(issueId, { proc, kill: killFn });
+  activeProcesses.set(issueUuid, { proc, kill: killFn });
   // S9: Notify caller of the PID so it can be persisted for crash-restart cleanup.
   onPidAssigned?.(proc.pid);
+
+  // Heartbeat: start a process-level heartbeat timer that updates heartbeat_at
+  // while the agent process is alive. This catches process crashes (SIGKILL, OOM, etc.)
+  // without requiring the agent to explicitly call a heartbeat MCP tool.
+  const heartbeatInterval = opts.agentKind === "nano" ? 30_000 : 60_000; // nano: 30s, claude-code: 60s
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  if (onHeartbeat) {
+    heartbeatTimer = setInterval(() => {
+      onHeartbeat(Date.now());
+    }, heartbeatInterval);
+  }
 
   proc.stdin.write(prompt);
   proc.stdin.end();
@@ -186,12 +234,15 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
           stdoutBytes += value.byteLength;
           if (stdoutBytes > STDOUT_BUFFER_LIMIT) {
             stdoutTruncated = true;
+            // The chunk that crosses the boundary goes into the tail buffer
+            // so it isn't lost (it may contain the start of the result JSON).
           } else {
             stdoutChunks.push(value);
           }
         }
         // Tail ring buffer: always keep the most recent TAIL_BUFFER_LIMIT bytes so
-        // the final result JSON line is never dropped.
+        // the final result JSON line is never dropped.  This includes the
+        // boundary-crossing chunk that triggered truncation.
         if (stdoutTruncated) {
           tailChunks.push(value);
           tailBytes += value.byteLength;
@@ -245,7 +296,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const exitCode = await proc.exited;
   clearTimeout(timeoutHandle);
   if (killTimer) clearTimeout(killTimer);
-  activeProcesses.delete(issueId);
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  activeProcesses.delete(issueUuid);
 
   // Wait for all output to be collected
   await Promise.all([stdoutPromise, stderrPromise]);

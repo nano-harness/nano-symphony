@@ -14,15 +14,17 @@ import type { SymphonyEvent, SymphonyRun } from "../db/tracker.ts";
 import type { RunPatch } from "../db/event_bus.ts";
 import { cancelAgent, getActiveProcessCount } from "../spawner/index.ts";
 import { removeWorkspace } from "../workspace/manager.ts";
+import type { PlanRunState } from "../db/tracker-plan-runs.ts";
 
-const IDENT_RE = /^[A-Z][A-Z0-9]*-\d+$/;
-const VALID_STATES = ["backlog", "todo", "planning", "plan_review", "in_progress", "in_review", "done", "cancelled"] as const;
+const VALID_STATES = ["backlog", "todo", "awaiting_plan", "planning", "plan_review", "in_progress", "in_review", "done", "cancelled"] as const;
 const AgentKindEnum = z.enum(["nano", "claude-code"]).nullable().optional();
 const AGENT_BINARIES: Record<string, string> = { nano: "nano", "claude-code": "claude" };
+const PLAN_RUN_STATES = ["pending", "dry_running", "awaiting_approval", "running", "done", "failed", "cancelled"] as const;
+const PlanRunStateEnum = z.enum(PLAN_RUN_STATES);
 
-// Slash command patterns for comment-based plan directives
+// Slash command pattern for comment-based approve directive
 const CMD_APPROVE_RE = /^\/(?:approve|lgtm|execute)\b/i;
-const CMD_REVISE_RE = /^\/revise\s+/i;
+const CMD_REVISE_RE = /^\/revise(?:\s+(.*\S))?\s*$/i;
 const CMD_SKIP_PLAN_RE = /^\/skip-plan\b/i;
 
 // SSE connection limit to prevent listener accumulation
@@ -30,8 +32,6 @@ const MAX_SSE_CONNECTIONS = 50;
 let activeSSECount = 0;
 
 const IssueCreateSchema = z.object({
-  id: nullishString(),
-  identifier: z.string().regex(IDENT_RE, "identifier must look like DEMO-1").optional(),
   title: z.string().min(1, "title is required").max(200),
   description: nullishString({ max: 20000 }),
   priority: z.enum(["urgent", "high", "medium", "low"]).default("medium"),
@@ -40,6 +40,7 @@ const IssueCreateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
+  require_plan: z.boolean().nullable().optional(),
   labels: z.array(z.string()).default([]),
 }).strict();
 
@@ -52,6 +53,7 @@ const IssueUpdateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
+  require_plan: z.boolean().nullable().optional(),
   labels: z.array(z.string()).optional(),
 }).strict(); // Reject unexpected fields like identifier or id
 
@@ -67,6 +69,33 @@ export function createRoutes(
 ): Hono {
   const app = new Hono();
   const startedAt = Date.now();
+
+  function releaseForReschedule(uuid: string): void {
+    const run = tracker.getRun(uuid);
+    if (run && run.last_state !== "released") tracker.releaseIssue(uuid, "released");
+  }
+
+  function approvePlan(uuid: string, note?: string): { ok: boolean; state?: string; error?: string } {
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return { ok: false, error: "Not found" };
+    if (issue.state !== "plan_review") return { ok: false, error: "Issue is not in plan_review state" };
+    tracker.updateIssueState(uuid, "in_progress");
+    tracker.recordEvent(uuid, "plan_approved", note ?? "Plan approved", { note });
+    releaseForReschedule(uuid);
+    triggerTick();
+    return { ok: true, state: "in_progress" };
+  }
+
+  function revisePlan(uuid: string, note: string): { ok: boolean; state?: string; error?: string } {
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return { ok: false, error: "Not found" };
+    if (issue.state !== "plan_review") return { ok: false, error: "Issue is not in plan_review state" };
+    tracker.updateIssueState(uuid, "planning");
+    tracker.recordEvent(uuid, "plan_revision_requested", note, { note });
+    releaseForReschedule(uuid);
+    triggerTick();
+    return { ok: true, state: "planning" };
+  }
 
   app.get("/health", (c) => {
     const workflowLoaded = _getWorkflow() !== undefined;
@@ -101,48 +130,49 @@ export function createRoutes(
     return c.json(issues);
   });
 
-  app.get("/issues/:id", (c) => {
-    const issue = tracker.getIssue(c.req.param("id"));
+  app.get("/issues/:uuid", (c) => {
+    const issue = tracker.getIssue(c.req.param("uuid"));
     if (!issue) return c.json({ error: "Not found" }, 404);
     return c.json(issue);
   });
 
   app.post("/issues", async (c) => {
     const body = await c.req.json();
+    if (typeof body === "object" && body !== null && ("id" in body || "identifier" in body || "uuid" in body)) {
+      return c.json({ error: "fields 'id', 'identifier', and 'uuid' are not accepted; server auto-generates TASK-N identifiers" }, 400);
+    }
     const parsed = IssueCreateSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
-    const { identifier: providedIdent, id: providedId, ...rest } = parsed.data;
-    const identifier = providedIdent ?? `TASK-${tracker.getNextTaskNumber()}`;
-    const issue = { ...rest, identifier, id: providedId ?? nanoid(), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-    tracker.insertIssue(issue);
+    const uuid = nanoid();
+    const inserted = tracker.insertIssue({ ...parsed.data, uuid });
     triggerTick(); // Kick orchestrator on new issue
-    return c.json(tracker.getIssue(issue.id), 201);
+    return c.json(inserted, 201);
   });
 
-  app.put("/issues/:id", async (c) => {
-    const existing = tracker.getIssue(c.req.param("id"));
+  app.put("/issues/:uuid", async (c) => {
+    const existing = tracker.getIssue(c.req.param("uuid"));
     if (!existing) return c.json({ error: "Not found" }, 404);
     const parsed = IssueUpdateSchema.safeParse(await c.req.json());
     if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
-    tracker.insertIssue({
-      ...existing,
+    const updated = tracker.updateIssue(existing.uuid, {
       ...parsed.data,
-      id: existing.id,
+      title: parsed.data.title ?? existing.title,
+      state: parsed.data.state ?? existing.state,
       updated_at: new Date().toISOString(),
-    } as Parameters<typeof tracker.insertIssue>[0] & { updated_at: string });
+    });
     triggerTick(); // Kick orchestrator on issue update
-    return c.json(tracker.getIssue(existing.id));
+    return c.json(updated);
   });
 
-  app.delete("/issues/:id", async (c) => {
-    const result = tracker.deleteIssue(c.req.param("id"));
+  app.delete("/issues/:uuid", async (c) => {
+    const result = tracker.deleteIssue(c.req.param("uuid"));
     if (!result.deleted) return c.json({ error: "Not found" }, 404);
 
     if (result.workspace?.path) {
       const workflow = _getWorkflow();
       const hooks = workflow?.workflow.workspace?.hooks;
       const hookEnv: Record<string, string> = {
-        SYMPHONY_ISSUE_ID: c.req.param("id"),
+        SYMPHONY_ISSUE_UUID: c.req.param("uuid"),
         SYMPHONY_WORKSPACE: result.workspace.path,
         SYMPHONY_WORKSPACE_MANAGED: result.workspace.managed ? "1" : "0",
       };
@@ -162,8 +192,8 @@ export function createRoutes(
 
   app.get("/runs", (c) => c.json(tracker.getActiveRuns()));
 
-  app.get("/runs/:issueId", (c) => {
-    const run = tracker.getRun(c.req.param("issueId"));
+  app.get("/runs/:issueUuid", (c) => {
+    const run = tracker.getRun(c.req.param("issueUuid"));
     if (!run) return c.json({ error: "Not found" }, 404);
     return c.json(run);
   });
@@ -177,8 +207,9 @@ export function createRoutes(
     if (activeSSECount >= MAX_SSE_CONNECTIONS) {
       return c.json({ error: "Too many SSE connections" }, 503);
     }
+    // Increment before entering streamSSE so the check above is consistent.
+    activeSSECount++;
     return streamSSE(c, async (stream) => {
-      activeSSECount++;
       // Support Last-Event-ID for reconnection catch-up
       const lastEventId = c.req.header("Last-Event-ID");
       const querySince = c.req.query("since");
@@ -241,14 +272,14 @@ export function createRoutes(
     });
   });
 
-  app.post("/runs/:issueId/cancel", (c) => {
-    const issueId = c.req.param("issueId");
-    cancelAgent(issueId); // Kill the process first (no-op if not running)
-    tracker.releaseIssue(issueId, "cancelled");
+  app.post("/runs/:issueUuid/cancel", (c) => {
+    const issueUuid = c.req.param("issueUuid");
+    cancelAgent(issueUuid); // Kill the process first (no-op if not running)
+    tracker.releaseIssue(issueUuid, "cancelled");
     return c.json({ ok: true });
   });
-  app.post("/runs/:issueId/pause", (c) => { tracker.releaseIssue(c.req.param("issueId"), "paused"); return c.json({ ok: true }); });
-  app.post("/runs/:issueId/resume", (c) => { tracker.releaseIssue(c.req.param("issueId"), "released"); return c.json({ ok: true }); });
+  app.post("/runs/:issueUuid/pause", (c) => { tracker.releaseIssue(c.req.param("issueUuid"), "paused"); return c.json({ ok: true }); });
+  app.post("/runs/:issueUuid/resume", (c) => { tracker.releaseIssue(c.req.param("issueUuid"), "released"); return c.json({ ok: true }); });
 
   app.get("/workflow", async (c) => {
     try { return c.json({ content: await fs.readFile(config.WORKFLOW_PATH, "utf-8") }); } catch { return c.json({ content: "" }); }
@@ -261,24 +292,24 @@ export function createRoutes(
     if (options?.reloadWorkflow) {
       const result = options.reloadWorkflow();
       if (result) {
-        bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_id: null, message: "workflow reloaded via PUT /workflow", payload_json: null });
+        bus.emit("event", { kind: "workflow_reloaded", ts: Date.now(), issue_uuid: null, message: "workflow reloaded via PUT /workflow", payload_json: null });
       } else {
-        bus.emit("event", { kind: "workflow_reload_failed", ts: Date.now(), issue_id: null, message: "workflow reload failed after PUT /workflow", payload_json: null });
+        bus.emit("event", { kind: "workflow_reload_failed", ts: Date.now(), issue_uuid: null, message: "workflow reload failed after PUT /workflow", payload_json: null });
       }
     }
     return c.json({ ok: true });
   });
 
-  app.get("/logs/:issueId/:attempt", (c) => {
-    const { issueId, attempt: attemptParam } = c.req.param();
+  app.get("/logs/:issueUuid/:attempt", (c) => {
+    const { issueUuid, attempt: attemptParam } = c.req.param();
     return streamSSE(c, async (stream) => {
-      const issue = tracker.getIssue(issueId);
+      const issue = tracker.getIssue(issueUuid);
       if (!issue) {
         await stream.writeSSE({ data: "Issue not found", event: "error" });
         return;
       }
 
-      const run = tracker.getRun(issueId);
+      const run = tracker.getRun(issueUuid);
       const wsPath = run?.workspace_path;
       if (!wsPath) {
         await stream.writeSSE({ data: "No workspace found", event: "error" });
@@ -300,7 +331,7 @@ export function createRoutes(
 
       // Helper to check if run is in terminal state
       const isTerminal = () => {
-        const currentRun = tracker.getRun(issueId);
+        const currentRun = tracker.getRun(issueUuid);
         return currentRun && TERMINAL_STATES.has(currentRun.last_state);
       };
 
@@ -377,92 +408,70 @@ export function createRoutes(
   });
 
   // Handoff review endpoints
-  app.get("/issues/:id/handoff", (c) => {
-    const handoffEvent = tracker.getLatestEventByKind(c.req.param("id"), "handoff");
+  app.get("/issues/:uuid/handoff", (c) => {
+    const handoffEvent = tracker.getLatestEventByKind(c.req.param("uuid"), "handoff");
     if (!handoffEvent) return c.json({ error: "No handoff yet" }, 404);
     return c.json({ ...handoffEvent, payload: JSON.parse(handoffEvent.payload_json ?? "{}") });
   });
 
-  app.get("/issues/:id/plan", (c) => {
-    const planEvent = tracker.getLatestEventByKind(c.req.param("id"), "plan_submitted");
+  app.get("/issues/:uuid/plan", (c) => {
+    const planEvent = tracker.getLatestEventByKind(c.req.param("uuid"), "plan_submitted");
     if (!planEvent) return c.json({ error: "No plan submitted yet" }, 404);
     return c.json({ ...planEvent, payload: JSON.parse(planEvent.payload_json ?? "{}") });
   });
 
-  app.post("/issues/:id/approve", async (c) => {
-    const id = c.req.param("id");
+  app.post("/issues/:uuid/approve", async (c) => {
+    const uuid = c.req.param("uuid");
     const body = (await c.req.json().catch(() => ({}))) as { note?: string };
-    tracker.updateIssueState(id, "done");
-    tracker.updateLastIssueState(id, "done");
-    tracker.recordEvent(id, "approved", body.note ?? "Approved by reviewer", { note: body.note });
+    tracker.updateIssueState(uuid, "done");
+    tracker.updateLastIssueState(uuid, "done");
+    tracker.recordEvent(uuid, "approved", body.note ?? "Approved by reviewer", { note: body.note });
     return c.json({ ok: true });
   });
 
-  app.post("/issues/:id/request-changes", async (c) => {
-    const id = c.req.param("id");
+  app.post("/issues/:uuid/request-changes", async (c) => {
+    const uuid = c.req.param("uuid");
     const body = await c.req.json().catch(() => ({}));
     const parsed = RequestChangesSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, 400);
     const { note } = parsed.data;
-    tracker.updateIssueState(id, "todo");
-    tracker.updateLastIssueState(id, "todo");
-    tracker.recordEvent(id, "revision_requested", note, { note });
+    tracker.updateIssueState(uuid, "todo");
+    tracker.updateLastIssueState(uuid, "todo");
+    tracker.recordEvent(uuid, "revision_requested", note, { note });
     triggerTick();
     return c.json({ ok: true });
   });
 
-  app.post("/issues/:id/approve-plan", async (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
-    if (!issue) return c.json({ error: "Not found" }, 404);
-    if (issue.state !== "plan_review") return c.json({ error: `Issue must be in 'plan_review' state (current: '${issue.state}')` }, 400);
+  app.post("/issues/:uuid/approve-plan", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { note?: string };
-    tracker.recordEvent(id, "plan_approved", body.note ?? "Plan approved by operator", { note: body.note });
-    tracker.updateIssueState(id, "in_progress");
-    tracker.updateLastIssueState(id, "");
-    const run = tracker.getRun(id);
-    if (run && run.last_state !== "released") {
-      tracker.releaseIssue(id, "released");
+    const result = approvePlan(c.req.param("uuid"), body.note);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.error === "Not found" ? 404 : 400);
     }
-    if (body.note?.trim()) {
-      tracker.addComment(id, { body: body.note, author: "operator" });
-      tracker.recordEvent(id, "comment_added", body.note.slice(0, 120), { author: "operator" });
-    }
-    triggerTick();
-    return c.json({ ok: true, state: "in_progress" });
+    return c.json({ ok: true, state: result.state });
   });
 
-  app.post("/issues/:id/revise-plan", async (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
-    if (!issue) return c.json({ error: "Not found" }, 404);
-    if (issue.state !== "plan_review") return c.json({ error: `Issue must be in 'plan_review' state (current: '${issue.state}')` }, 400);
-    const body = (await c.req.json().catch(() => ({}))) as { note?: string };
-    if (!body?.note?.trim()) return c.json({ error: "note is required" }, 400);
-    tracker.recordEvent(id, "plan_revision_requested", body.note, { note: body.note });
-    tracker.updateIssueState(id, "planning");
-    tracker.updateLastIssueState(id, "");
-    const run = tracker.getRun(id);
-    if (run && run.last_state !== "released") {
-      tracker.releaseIssue(id, "released");
+  app.post("/issues/:uuid/revise-plan", async (c) => {
+    const parsed = RequestChangesSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, 400);
+    const result = revisePlan(c.req.param("uuid"), parsed.data.note);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.error === "Not found" ? 404 : 400);
     }
-    tracker.addComment(id, { body: body.note, author: "operator" });
-    tracker.recordEvent(id, "comment_added", body.note.slice(0, 120), { author: "operator" });
-    triggerTick();
-    return c.json({ ok: true, state: "planning" });
+    return c.json({ ok: true, state: result.state });
   });
 
-  app.post("/issues/:id/reveal-workspace", async (c) => {
+  app.post("/issues/:uuid/reveal-workspace", async (c) => {
     if (!config.ALLOW_REVEAL_WORKSPACE) return c.json({ error: "disabled" }, 403);
-    const run = tracker.getRun(c.req.param("id"));
+    const run = tracker.getRun(c.req.param("uuid"));
     if (!run?.workspace_path) return c.json({ error: "no workspace" }, 404);
     const cmd = process.platform === "darwin" ? "open" : "xdg-open";
     Bun.spawn([cmd, run.workspace_path]);
     return c.json({ ok: true, path: run.workspace_path });
   });
 
-  app.get("/workspaces/:id/file", async (c) => {
-    const run = tracker.getRun(c.req.param("id"));
+  app.get("/workspaces/:uuid/file", async (c) => {
+    const run = tracker.getRun(c.req.param("uuid")!);
     if (!run?.workspace_path) return c.json({ error: "no workspace" }, 404);
     const rel = c.req.query("path") ?? "";
     const full = path.resolve(run.workspace_path, rel);
@@ -492,69 +501,56 @@ export function createRoutes(
     author: z.string().max(64).optional(),
   }).strict();
 
-  app.post("/issues/:id/comments", async (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
+  app.post("/issues/:uuid/comments", async (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
     if (!issue) return c.json({ error: "Not found" }, 404);
     const parsed = CommentCreateSchema.safeParse(await c.req.json());
     if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
-    const comment = tracker.addComment(id, { body: parsed.data.body, author: parsed.data.author });
-    tracker.recordEvent(id, "comment_added", parsed.data.body.slice(0, 120), { comment_id: comment.id, author: comment.author });
+    const comment = tracker.addComment(uuid, { body: parsed.data.body, author: parsed.data.author });
+    tracker.recordEvent(uuid, "comment_added", parsed.data.body.slice(0, 120), { comment_id: comment.id, author: comment.author });
 
     // Post-insert: parse slash commands from comment body
     const bodyText = parsed.data.body.trim();
+    const reviseMatch = CMD_REVISE_RE.exec(bodyText);
     if (CMD_APPROVE_RE.test(bodyText)) {
-      // /approve, /lgtm, /execute → approve plan
       if (issue.state === "plan_review") {
-        tracker.recordEvent(id, "plan_approved", "Plan approved via comment command", { command: bodyText.split(/\s/)[0], comment_id: comment.id });
-        tracker.updateIssueState(id, "in_progress");
-        tracker.updateLastIssueState(id, "");
-        const run = tracker.getRun(id);
-        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
+        approvePlan(uuid);
+      } else {
+        releaseForReschedule(uuid);
         triggerTick();
       }
-    } else if (CMD_REVISE_RE.test(bodyText)) {
-      // /revise <content> → revise plan
-      const note = bodyText.replace(CMD_REVISE_RE, "").trim();
+    } else if (reviseMatch) {
+      const note = reviseMatch[1]?.trim();
       if (issue.state === "plan_review" && note) {
-        tracker.recordEvent(id, "plan_revision_requested", note, { note, comment_id: comment.id });
-        tracker.updateIssueState(id, "planning");
-        tracker.updateLastIssueState(id, "");
-        const run = tracker.getRun(id);
-        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
-        triggerTick();
+        revisePlan(uuid, note);
       }
-    } else if (CMD_SKIP_PLAN_RE.test(bodyText)) {
-      // /skip-plan → skip planning, go directly to in_progress
-      if (issue.state === "todo") {
-        tracker.updateIssueState(id, "in_progress");
-        tracker.updateLastIssueState(id, "");
-        const run = tracker.getRun(id);
-        if (run && run.last_state !== "released") tracker.releaseIssue(id, "released");
-        tracker.recordEvent(id, "comment_added", "Planning phase skipped via /skip-plan command", { command: "/skip-plan", comment_id: comment.id });
-        triggerTick();
-      }
+    } else if (CMD_SKIP_PLAN_RE.test(bodyText) && issue.state === "todo") {
+      tracker.updateIssueState(uuid, "in_progress");
+      // /skip-plan moves a queued issue straight into execution and re-dispatches it.
+      releaseForReschedule(uuid);
+      triggerTick();
     }
     // Other comment bodies are silently treated as regular comments.
 
     return c.json(comment, 201);
   });
 
-  app.get("/issues/:id/comments", (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
+  app.get("/issues/:uuid/comments", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
     if (!issue) return c.json({ error: "Not found" }, 404);
     const since = c.req.query("since");
-    const comments = tracker.listComments(id, since ? { since: Number(since) } : undefined);
+    const comments = tracker.listComments(uuid, since ? { since: Number(since) } : undefined);
     return c.json(comments);
   });
 
-  app.delete("/issues/:id/comments/:commentId", (c) => {
-    const id = c.req.param("id");
+  app.delete("/issues/:uuid/comments/:commentId", (c) => {
+    const uuid = c.req.param("uuid");
     const commentId = c.req.param("commentId");
     const deleted = tracker.deleteComment(commentId);
     if (deleted) {
-      tracker.recordEvent(id, "comment_deleted", `Comment ${commentId} deleted`, { comment_id: commentId });
+      tracker.recordEvent(uuid, "comment_deleted", `Comment ${commentId} deleted`, { comment_id: commentId });
     }
     return c.json({ ok: true, deleted });
   });
@@ -567,9 +563,9 @@ export function createRoutes(
     note: z.string().max(8000).optional(),
   }).strict();
 
-  app.post("/issues/:id/retrigger", async (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
+  app.post("/issues/:uuid/retrigger", async (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
     if (!issue) return c.json({ error: "Not found" }, 404);
     const body = await c.req.json().catch(() => ({}));
     const parsed = RetriggerSchema.safeParse(body);
@@ -578,32 +574,32 @@ export function createRoutes(
 
     // Optional note → addComment
     if (note?.trim()) {
-      const noteComment = tracker.addComment(id, { body: note, author: "operator" });
-      tracker.recordEvent(id, "comment_added", note.slice(0, 120), { comment_id: noteComment.id, author: "operator" });
+      const noteComment = tracker.addComment(uuid, { body: note, author: "operator" });
+      tracker.recordEvent(uuid, "comment_added", note.slice(0, 120), { comment_id: noteComment.id, author: "operator" });
     }
 
     const fromState = issue.state;
 
     // Reset state
     if (issue.state !== target_state) {
-      tracker.updateIssueState(id, target_state);
+      tracker.updateIssueState(uuid, target_state);
     }
     // Critical: clear last_issue_state so candidate SQL picks it up
-    tracker.updateLastIssueState(id, "");
+    tracker.updateLastIssueState(uuid, "");
 
     // Release run if in non-released state
-    const run = tracker.getRun(id);
+    const run = tracker.getRun(uuid);
     if (run && run.last_state !== "released") {
-      tracker.releaseIssue(id, "released");
+      tracker.releaseIssue(uuid, "released");
     }
 
     // Reset blocker fingerprint
     if (reset_blocker_fingerprint) {
-      tracker.updateLastBlockerFingerprint(id, null);
+      tracker.updateLastBlockerFingerprint(uuid, null);
     }
 
-    const commentsTotal = tracker.countComments(id);
-    tracker.recordEvent(id, "retrigger_requested", `Retrigger: ${fromState} → ${target_state}`, {
+    const commentsTotal = tracker.countComments(uuid);
+    tracker.recordEvent(uuid, "retrigger_requested", `Retrigger: ${fromState} → ${target_state}`, {
       from_state: fromState,
       to_state: target_state,
       reset_blocker_fingerprint,
@@ -627,13 +623,13 @@ export function createRoutes(
     return c.json(items);
   });
 
-  app.get("/issues/:id/artifacts", (c) => {
-    const id = c.req.param("id");
-    const issue = tracker.getIssue(id);
+  app.get("/issues/:uuid/artifacts", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
     if (!issue) return c.json({ error: "Not found" }, 404);
     const attemptStr = c.req.query("attempt");
     const attempt = attemptStr !== undefined ? Number.parseInt(attemptStr, 10) : undefined;
-    const artifacts = tracker.listArtifacts(id, attempt);
+    const artifacts = tracker.listArtifacts(uuid, attempt);
     // Omit content from list response to keep payload small
     const items = artifacts.map(({ content, storage_path, ...rest }) => rest);
     return c.json(items);
@@ -686,7 +682,7 @@ export function createRoutes(
     // prevent symlink-escape attacks (agent creates link -> /etc/passwd and
     // reports it as an artifact path).
     if (artifact.path) {
-      const run = tracker.getRun(artifact.issue_id);
+      const run = tracker.getRun(artifact.issue_uuid);
       if (run?.workspace_path) {
         const full = path.resolve(run.workspace_path, artifact.path);
         try {
@@ -714,6 +710,147 @@ export function createRoutes(
     }
 
     return c.json({ error: "No content available" }, 404);
+  });
+
+  // ─── Plan Runs ────────────────────────────────────────────────────────────────
+
+  const PlanRunCreateSchema = z.object({
+    script: z.string().min(1).max(65_536),
+    meta: z.object({
+      name: z.string().min(1),
+      max_issues: z.number().int().positive().max(100),
+      max_budget_tokens: z.number().int().positive().optional(),
+      phases: z.array(z.string()).optional(),
+    }),
+    args: z.unknown().optional(),
+    caller_issue_uuid: z.string().optional(),
+    wall_time_ms: z.number().int().positive().max(7 * 24 * 60 * 60 * 1000).optional(),
+  });
+
+  const PLAN_RUN_LONG_POLL_TIMEOUT_MS = 30_000;
+
+  app.post("/plan-runs", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = PlanRunCreateSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
+
+    const d = parsed.data;
+    const runId = `RUN-${Date.now()}-${nanoid(6)}`;
+    tracker.insertPlanRun({
+      id: runId,
+      caller_issue_uuid: d.caller_issue_uuid ?? null,
+      script: d.script,
+      meta: d.meta,
+      args: d.args,
+      wall_time_ms: d.wall_time_ms ?? 7 * 24 * 60 * 60 * 1000,
+    });
+    triggerTick();
+    return c.json({ id: runId, state: "pending" }, 201);
+  });
+
+  app.get("/plan-runs", (c) => {
+    const parsedState = PlanRunStateEnum.safeParse(c.req.query("state"));
+    const caller = c.req.query("caller_issue_uuid");
+    const state: PlanRunState | undefined = parsedState.success ? parsedState.data : undefined;
+    let runs = tracker.listPlanRuns({ state });
+    if (caller) {
+      runs = runs.filter(r => r.caller_issue_uuid === caller);
+    }
+    return c.json(runs);
+  });
+
+  app.get("/plan-runs/:id", (c) => {
+    const run = tracker.getPlanRun(c.req.param("id"));
+    if (!run) return c.json({ error: "Not found" }, 404);
+    return c.json(run);
+  });
+
+  app.get("/plan-runs/:id/result", async (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+
+    // If already in terminal state, return immediately
+    const TERMINAL = ["done", "failed", "cancelled"];
+    if (TERMINAL.includes(run.state)) {
+      return c.json({ id: run.id, state: run.state, result: run.result });
+    }
+
+    // Long-poll: wait up to 30s for terminal state
+    const deadline = Date.now() + PLAN_RUN_LONG_POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise(res => setTimeout(res, 1_000));
+      const updated = tracker.getPlanRun(id);
+      if (!updated) return c.json({ error: "Not found" }, 404);
+      if (TERMINAL.includes(updated.state)) {
+        return c.json({ id: updated.id, state: updated.state, result: updated.result });
+      }
+    }
+    // Still pending — return current state
+    const current = tracker.getPlanRun(id);
+    return c.json({ id: current!.id, state: current!.state, result: null }, 202);
+  });
+
+  app.post("/plan-runs/:id/approve", async (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    if (run.state !== "awaiting_approval") {
+      return c.json({ error: `Plan run must be in 'awaiting_approval' state (current: '${run.state}')` }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { approved_by?: string };
+    tracker.approvePlanRun(id, body.approved_by ?? "operator");
+    triggerTick();
+    return c.json({ ok: true, state: "awaiting_approval", approval_status: "approved" });
+  });
+
+  app.post("/plan-runs/:id/reject", async (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    if (run.state !== "awaiting_approval") {
+      return c.json({ error: `Plan run must be in 'awaiting_approval' state (current: '${run.state}')` }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    tracker.rejectPlanRun(id, body.reason ?? "Rejected");
+    triggerTick();
+    return c.json({ ok: true, state: "cancelled" });
+  });
+
+  app.post("/plan-runs/:id/request-changes", async (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    if (run.state !== "awaiting_approval") {
+      return c.json({ error: `Plan run must be in 'awaiting_approval' state (current: '${run.state}')` }, 400);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { suggestion?: string };
+    // request-changes → reject with suggestion; caller can re-spawn with adjustments
+    tracker.rejectPlanRun(id, `Changes requested: ${body.suggestion ?? "(no suggestion provided)"}`);
+    triggerTick();
+    return c.json({ ok: true, state: "cancelled" });
+  });
+
+  app.delete("/plan-runs/:id", (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    const TERMINAL = ["done", "failed", "cancelled"];
+    if (TERMINAL.includes(run.state)) {
+      return c.json({ error: `Plan run is already in terminal state '${run.state}'` }, 400);
+    }
+    tracker.finishPlanRun(id, "cancelled", "cancelled by operator");
+
+    // Cascade: cancel non-terminal sub-issues
+    const subIssues = tracker.listIssuesByPlanRun(id);
+    for (const issue of subIssues) {
+      if (!["done", "cancelled"].includes(issue.state)) {
+        tracker.updateIssueState(issue.uuid, "cancelled");
+        tracker.recordEvent(issue.uuid, "issue_cancelled", `Cancelled: parent plan run ${id} cancelled by operator`, { run_id: id });
+      }
+    }
+    triggerTick();
+    return c.json({ ok: true, state: "cancelled" });
   });
 
   return app;

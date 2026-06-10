@@ -43,13 +43,15 @@ describe("install.sh preserves user config files", () => {
     const metaFile = path.join(tmp, "meta.json");
 
     // Build a payload that includes WORKFLOW.md and .env (simulating release tarball)
-    await fs.mkdir(path.join(payload, "templates"), { recursive: true });
+    await fs.mkdir(path.join(payload, "share", "templates"), { recursive: true });
     await fs.mkdir(fakeBin, { recursive: true });
     await fs.writeFile(path.join(payload, "package.json"), JSON.stringify({ version: "2.0.0" }), "utf-8");
+    await fs.mkdir(path.join(payload, "share"), { recursive: true });
+    await fs.writeFile(path.join(payload, "share", "VERSION"), "2.0.0", "utf-8");
     await fs.writeFile(path.join(payload, ".env.example"), "# example env\n", "utf-8");
     await fs.writeFile(path.join(payload, ".env"), "OVERWRITTEN=true\n", "utf-8");
     await fs.writeFile(path.join(payload, "WORKFLOW.md"), "# Docs page without template vars\n", "utf-8");
-    await fs.writeFile(path.join(payload, "templates", "WORKFLOW.example.md"), "---\ntracker: linear\n---\n{{ issue.title }}\n", "utf-8");
+    await fs.writeFile(path.join(payload, "share", "templates", "WORKFLOW.example.md"), "---\ntracker: linear\n---\n{{ issue.title }}\n", "utf-8");
 
     let result = run(["tar", "-czf", archive, "-C", payload, "."]);
     expect(result.exitCode).toBe(0);
@@ -168,11 +170,13 @@ describe("install.sh update command", () => {
     const binDir = path.join(tmp, "bin");
     const curlLog = path.join(tmp, "curl.log");
     const metaFile = path.join(tmp, "meta.json");
-    await fs.mkdir(path.join(payload, "templates"), { recursive: true });
+    await fs.mkdir(path.join(payload, "share", "templates"), { recursive: true });
     await fs.mkdir(fakeBin, { recursive: true });
     await fs.writeFile(path.join(payload, "package.json"), JSON.stringify({ version: installedVersion }), "utf-8");
+    await fs.mkdir(path.join(payload, "share"), { recursive: true });
+    await fs.writeFile(path.join(payload, "share", "VERSION"), installedVersion, "utf-8");
     await fs.writeFile(path.join(payload, ".env.example"), "", "utf-8");
-    await fs.writeFile(path.join(payload, "templates", "WORKFLOW.example.md"), "", "utf-8");
+    await fs.writeFile(path.join(payload, "share", "templates", "WORKFLOW.example.md"), "", "utf-8");
     await fs.writeFile(metaFile, JSON.stringify({ version: metadataVersion, install_script_url: "https://example.test/install.sh" }), "utf-8");
 
     let result = run(["tar", "-czf", archive, "-C", payload, "."]);

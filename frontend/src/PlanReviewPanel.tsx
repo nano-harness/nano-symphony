@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { api } from "./api";
 
 interface PlanReviewPanelProps {
-  issueId: string;
+  issueUuid: string;
   issueState: string;
   onAction?: () => void;
 }
@@ -26,20 +26,18 @@ export function PlanReviewPanel(props: PlanReviewPanelProps) {
   const [reviseNote, setReviseNote] = createSignal("");
 
   onMount(async () => {
-    if (props.issueState === "plan_review" || props.issueState === "planning" || props.issueState === "in_progress") {
-      try {
-        const result = await api.getPlan(props.issueId);
-        if (result) setPlan(result.payload);
-      } catch {
-        // No plan yet
-      }
+    try {
+      const result = await api.getPlan(props.issueUuid);
+      if (result) setPlan(result.payload);
+    } catch {
+      // No plan yet
     }
   });
 
   const handleApprove = async () => {
     setLoading(true);
     try {
-      await api.approvePlan(props.issueId);
+      await api.approvePlan(props.issueUuid);
       props.onAction?.();
     } catch (err) {
       alert(`Failed to approve plan: ${err instanceof Error ? err.message : String(err)}`);
@@ -55,7 +53,7 @@ export function PlanReviewPanel(props: PlanReviewPanelProps) {
     }
     setLoading(true);
     try {
-      await api.revisePlan(props.issueId, reviseNote());
+      await api.revisePlan(props.issueUuid, reviseNote());
       props.onAction?.();
     } catch (err) {
       alert(`Failed to request plan revision: ${err instanceof Error ? err.message : String(err)}`);
@@ -71,7 +69,9 @@ export function PlanReviewPanel(props: PlanReviewPanelProps) {
           <h2 class="section-title">
             {props.issueState === "planning"
               ? "⏳ Planning in progress..."
-              : "📋 Implementation Plan — Review Required"}
+              : props.issueState === "plan_review"
+              ? "📋 Implementation Plan — Review Required"
+              : "📋 Implementation Plan"}
           </h2>
           <Show when={(plan()?.revision ?? 0) > 0}>
             <span class="pill" style="font-size: 11px;">Revision {plan()!.revision}</span>

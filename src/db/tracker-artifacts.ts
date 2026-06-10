@@ -1,9 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { nanoid } from "nanoid";
+import { unlinkSync } from "node:fs";
 
 export interface Artifact {
   id: string;
-  issue_id: string;
+  issue_uuid: string;
   attempt: number;
   source: "git_diff" | "mcp";
   kind: string;
@@ -18,7 +19,7 @@ export interface Artifact {
 }
 
 export interface ArtifactInput {
-  issue_id: string;
+  issue_uuid: string;
   attempt: number;
   source: "git_diff" | "mcp";
   kind: string;
@@ -33,16 +34,16 @@ export interface ArtifactInput {
 
 export function createArtifactOps(db: Database) {
   const insertStmt = db.prepare(`
-    INSERT INTO symphony_artifacts (id, issue_id, attempt, source, kind, label, path, content, metadata_json, storage_path, content_size, mime_type, ts)
+    INSERT INTO symphony_artifacts (id, issue_uuid, attempt, source, kind, label, path, content, metadata_json, storage_path, content_size, mime_type, ts)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const listByIssueStmt = db.prepare(`
-    SELECT * FROM symphony_artifacts WHERE issue_id = ? ORDER BY attempt ASC, ts ASC
+    SELECT * FROM symphony_artifacts WHERE issue_uuid = ? ORDER BY attempt ASC, ts ASC
   `);
 
   const listByIssueAttemptStmt = db.prepare(`
-    SELECT * FROM symphony_artifacts WHERE issue_id = ? AND attempt = ? ORDER BY ts ASC
+    SELECT * FROM symphony_artifacts WHERE issue_uuid = ? AND attempt = ? ORDER BY ts ASC
   `);
 
   const getByIdStmt = db.prepare(`
@@ -50,7 +51,7 @@ export function createArtifactOps(db: Database) {
   `);
 
   const deleteByIssueStmt = db.prepare(`
-    DELETE FROM symphony_artifacts WHERE issue_id = ?
+    DELETE FROM symphony_artifacts WHERE issue_uuid = ?
   `);
 
   const listRecentStmt = db.prepare(`
@@ -59,7 +60,7 @@ export function createArtifactOps(db: Database) {
 
   const existsByPathStmt = db.prepare(`
     SELECT 1 FROM symphony_artifacts
-    WHERE issue_id = ? AND attempt = ? AND path = ?
+    WHERE issue_uuid = ? AND attempt = ? AND path = ?
     LIMIT 1
   `);
 
@@ -71,7 +72,7 @@ export function createArtifactOps(db: Database) {
 
     insertStmt.run(
       id,
-      input.issue_id,
+      input.issue_uuid,
       input.attempt,
       input.source,
       input.kind,
@@ -87,7 +88,7 @@ export function createArtifactOps(db: Database) {
 
     return {
       id,
-      issue_id: input.issue_id,
+      issue_uuid: input.issue_uuid,
       attempt: input.attempt,
       source: input.source,
       kind: input.kind,
@@ -102,27 +103,34 @@ export function createArtifactOps(db: Database) {
     };
   }
 
-  function listArtifacts(issueId: string, attempt?: number): Artifact[] {
+  function listArtifacts(issueUuid: string, attempt?: number): Artifact[] {
     if (attempt !== undefined) {
-      return listByIssueAttemptStmt.all(issueId, attempt) as Artifact[];
+      return listByIssueAttemptStmt.all(issueUuid, attempt) as Artifact[];
     }
-    return listByIssueStmt.all(issueId) as Artifact[];
+    return listByIssueStmt.all(issueUuid) as Artifact[];
   }
 
   function getArtifact(id: string): Artifact | null {
     return (getByIdStmt.get(id) as Artifact) ?? null;
   }
 
-  function deleteArtifactsByIssue(issueId: string): void {
-    deleteByIssueStmt.run(issueId);
+  function deleteArtifactsByIssue(issueUuid: string): void {
+    // Remove artifact files from disk before deleting DB records
+    const artifacts = listByIssueStmt.all(issueUuid) as Artifact[];
+    for (const artifact of artifacts) {
+      if (artifact.storage_path) {
+        try { unlinkSync(artifact.storage_path); } catch { /* file may already be gone */ }
+      }
+    }
+    deleteByIssueStmt.run(issueUuid);
   }
 
   function listRecentArtifacts(limit: number): Artifact[] {
     return listRecentStmt.all(limit) as Artifact[];
   }
 
-  function artifactExistsByPath(issueId: string, attempt: number, filePath: string): boolean {
-    return !!existsByPathStmt.get(issueId, attempt, filePath);
+  function artifactExistsByPath(issueUuid: string, attempt: number, filePath: string): boolean {
+    return !!existsByPathStmt.get(issueUuid, attempt, filePath);
   }
 
   return {

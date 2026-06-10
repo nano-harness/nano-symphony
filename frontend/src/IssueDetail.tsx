@@ -1,6 +1,6 @@
 import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
 import { useParams, useNavigate, A } from "@solidjs/router";
-import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment } from "./api";
+import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment, type PlanRun } from "./api";
 import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
 import { PlanReviewPanel } from "./PlanReviewPanel";
@@ -14,7 +14,7 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export function IssueDetail() {
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ uuid: string }>();
   const navigate = useNavigate();
   const [issue, setIssue] = createSignal<Issue | null>(null);
   const [run, setRun] = createSignal<SymphonyRun | null>(null);
@@ -28,26 +28,29 @@ export function IssueDetail() {
   const [showRetriggerNote, setShowRetriggerNote] = createSignal(false);
   const [retriggerNote, setRetriggerNote] = createSignal("");
   const [showCancelConfirm, setShowCancelConfirm] = createSignal(false);
+  const [planRuns, setPlanRuns] = createSignal<PlanRun[]>([]);
 
   const load = async () => {
-    const [i, e, r, c] = await Promise.all([
-      api.getIssue(params.id),
+    const [i, e, r, c, pr] = await Promise.all([
+      api.getIssue(params.uuid),
       api.getEvents(),
-      api.getRun(params.id).catch(() => null),
-      api.listComments(params.id).catch(() => []),
+      api.getRun(params.uuid).catch(() => null),
+      api.listComments(params.uuid).catch(() => []),
+      api.listPlanRuns(params.uuid).catch(() => []),
     ]);
     setIssue(i);
-    setEvents(e.filter((ev) => ev.issue_id === params.id).sort((a, b) => a.ts - b.ts));
+    setEvents(e.filter((ev) => ev.issue_uuid === params.uuid).sort((a, b) => a.ts - b.ts));
     setRun(r);
     setComments(c);
+    setPlanRuns(pr);
   };
 
   // Refresh issue and run data (for live updates)
   const refreshIssueAndRun = async () => {
     try {
       const [i, r] = await Promise.all([
-        api.getIssue(params.id),
-        api.getRun(params.id).catch(() => null),
+        api.getIssue(params.uuid),
+        api.getRun(params.uuid).catch(() => null),
       ]);
       setIssue(i);
       setRun(r);
@@ -64,7 +67,7 @@ export function IssueDetail() {
     eventsSource.addEventListener("message", (e) => {
       try {
         const event = JSON.parse(e.data) as SymphonyEvent;
-        if (event.issue_id === params.id) {
+        if (event.issue_uuid === params.uuid) {
           setEvents((prev) => {
             // Deduplicate by id
             if (prev.some((ev) => ev.id === event.id)) return prev;
@@ -72,7 +75,7 @@ export function IssueDetail() {
           });
           // Refresh comments on comment events
           if (event.kind === "comment_added" || event.kind === "comment_deleted") {
-            api.listComments(params.id).then(setComments).catch(() => {});
+            api.listComments(params.uuid).then(setComments).catch(() => {});
           }
           // Refresh issue on retrigger
           if (event.kind === "retrigger_requested") {
@@ -85,8 +88,8 @@ export function IssueDetail() {
     // Listen to run events for immediate state updates
     eventsSource.addEventListener("run", (e) => {
       try {
-        const runPatch = JSON.parse(e.data) as Partial<SymphonyRun> & { issue_id: string };
-        if (runPatch.issue_id === params.id) {
+        const runPatch = JSON.parse(e.data) as Partial<SymphonyRun> & { issue_uuid: string };
+        if (runPatch.issue_uuid === params.uuid) {
           setRun((prev) => {
             if (!prev) return prev;
             return { ...prev, ...runPatch };
@@ -108,10 +111,13 @@ export function IssueDetail() {
   let logsSource: EventSource | null = null;
   let wiredAttempt: number | null = null;
   let logBackoff = 1000;
+  let logsDisposed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const reconnectLogs = (attempt: number) => {
+    if (logsDisposed) return;
     if (logsSource) logsSource.close();
-    logsSource = api.streamLogs(params.id, attempt);
+    logsSource = api.streamLogs(params.uuid, attempt);
     attachLogListeners(attempt);
   };
 
@@ -119,6 +125,7 @@ export function IssueDetail() {
     if (!logsSource) return;
 
     logsSource.addEventListener("log", (e: MessageEvent) => {
+      if (logsDisposed) return;
       setLogs((prev) => prev + e.data);
       logBackoff = 1000; // Reset backoff on successful message
     });
@@ -129,8 +136,11 @@ export function IssueDetail() {
 
     logsSource.addEventListener("error", () => {
       if (logsSource) logsSource.close();
+      if (logsDisposed) return;
       // Retry with exponential backoff
-      setTimeout(() => reconnectLogs(attempt), logBackoff);
+      reconnectTimer = setTimeout(() => {
+        if (!logsDisposed) reconnectLogs(attempt);
+      }, logBackoff);
       logBackoff = Math.min(logBackoff * 2, 10000);
     });
   };
@@ -149,6 +159,8 @@ export function IssueDetail() {
   });
 
   onCleanup(() => {
+    logsDisposed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (logsSource) logsSource.close();
   });
 
@@ -159,7 +171,7 @@ export function IssueDetail() {
 
   const handleDelete = async () => {
     try {
-      await api.deleteIssue(params.id);
+      await api.deleteIssue(params.uuid);
       showToast("Movement removed");
       setTimeout(() => navigate("/"), 500);
     } catch (err) {
@@ -177,9 +189,9 @@ export function IssueDetail() {
     const body = newComment().trim();
     if (!body) return;
     try {
-      await api.addComment(params.id, body);
+      await api.addComment(params.uuid, body);
       setNewComment("");
-      const c = await api.listComments(params.id);
+      const c = await api.listComments(params.uuid);
       setComments(c);
     } catch (err) {
       showToast("Failed to add comment", "error");
@@ -188,8 +200,8 @@ export function IssueDetail() {
 
   const handleDeleteComment = async (commentId: string) => {
     try {
-      await api.deleteComment(params.id, commentId);
-      const c = await api.listComments(params.id);
+      await api.deleteComment(params.uuid, commentId);
+      const c = await api.listComments(params.uuid);
       setComments(c);
     } catch (err) {
       showToast("Failed to delete comment", "error");
@@ -198,7 +210,7 @@ export function IssueDetail() {
 
   const handleRetrigger = async (note?: string) => {
     try {
-      await api.retrigger(params.id, note ? { note } : undefined);
+      await api.retrigger(params.uuid, note ? { note } : undefined);
       showToast("Retrigger requested");
       setShowRetriggerNote(false);
       setRetriggerNote("");
@@ -210,7 +222,7 @@ export function IssueDetail() {
 
   const handleCancel = async () => {
     try {
-      await api.cancelRun(params.id);
+      await api.cancelRun(params.uuid);
       showToast("Run cancelled");
       setShowCancelConfirm(false);
       await refreshIssueAndRun();
@@ -294,15 +306,57 @@ export function IssueDetail() {
               </div>
             </Show>
 
-            <HandoffPanel issueId={params.id} issueState={issue()!.state} />
+            <HandoffPanel issueUuid={params.uuid} issueState={issue()!.state} onActionComplete={refreshIssueAndRun} />
 
             <PlanReviewPanel
-              issueId={params.id}
+              issueUuid={params.uuid}
               issueState={issue()!.state}
               onAction={() => { load(); }}
             />
 
-            <ArtifactsPanel issueId={params.id} maxAttempt={run()?.next_attempt ? run()!.next_attempt - 1 : 0} />
+            <Show when={planRuns().length > 0}>
+              <div class="issue-section">
+                <h2 class="section-title">Plan Runs ({planRuns().length})</h2>
+                <For each={planRuns()}>
+                  {(pr) => (
+                    <div class="plan-run-card">
+                      <div class="plan-run-header">
+                        <span class="plan-run-id">{pr.id}</span>
+                        <span class={`pill ${pr.state}`}>{pr.state.replace("_", " ")}</span>
+                      </div>
+                      <Show when={pr.meta}>
+                        <div class="plan-run-meta">
+                          <span class="plan-run-name">
+                            {(() => {
+                              try { return JSON.parse(pr.meta).name ?? "Unnamed"; }
+                              catch { return "Unnamed"; }
+                            })()}
+                          </span>
+                        </div>
+                      </Show>
+                      <Show when={pr.dry_run_summary}>
+                        <div class="plan-run-summary">
+                          <details>
+                            <summary>Dry-run summary</summary>
+                            <pre class="plan-run-pre">{pr.dry_run_summary}</pre>
+                          </details>
+                        </div>
+                      </Show>
+                      <Show when={pr.result}>
+                        <div class="plan-run-result">
+                          <details>
+                            <summary>Result</summary>
+                            <pre class="plan-run-pre">{pr.result}</pre>
+                          </details>
+                        </div>
+                      </Show>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+
+            <ArtifactsPanel issueUuid={params.uuid} maxAttempt={run()?.next_attempt ? run()!.next_attempt - 1 : 0} />
 
             <div class="issue-section">
               <h2 class="section-title">Comments ({comments().length})</h2>
@@ -436,7 +490,7 @@ export function IssueDetail() {
                   </button>
                   <button
                     class="btn-icon"
-                    onClick={() => api.revealWorkspace(params.id)}
+                    onClick={() => api.revealWorkspace(params.uuid)}
                     title="Open in Finder"
                   >
                     ↗

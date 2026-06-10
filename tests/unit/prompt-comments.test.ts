@@ -13,9 +13,9 @@ function mkTracker() {
 describe("prompt comments rendering", () => {
   test("no comments: does not render comments block", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
-    const result = await renderPrompt("Do work", { }, { tracker, issueId: "i1" });
+    const result = await renderPrompt("Do work", { }, { tracker, issueUuid: "i1" });
     expect(result.text).toBe("Do work");
     expect(result.meta.commentIds).toEqual([]);
     expect(result.meta.truncated).toBe(false);
@@ -23,11 +23,11 @@ describe("prompt comments rendering", () => {
 
   test("renders comments in ts ASC order", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     tracker.addComment("i1", { body: "first comment", author: "alice" });
     tracker.addComment("i1", { body: "second comment", author: "operator" });
 
-    const result = await renderPrompt("Do work", { }, { tracker, issueId: "i1" });
+    const result = await renderPrompt("Do work", { }, { tracker, issueUuid: "i1" });
     expect(result.text).toContain("## Operator comments (2)");
     expect(result.text).toContain("first comment");
     expect(result.text).toContain("second comment");
@@ -42,11 +42,11 @@ describe("prompt comments rendering", () => {
 
   test("comments + revision_requested: correct order (revision first, then comments)", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     tracker.recordEvent("i1", "revision_requested", "Fix tests", { note: "Fix the failing tests" });
     tracker.addComment("i1", { body: "I added some context", author: "operator" });
 
-    const result = await renderPrompt("Do work", { }, { tracker, issueId: "i1" });
+    const result = await renderPrompt("Do work", { }, { tracker, issueUuid: "i1" });
     const reviewIdx = result.text.indexOf("Reviewer requested changes");
     const commentsIdx = result.text.indexOf("## Operator comments");
     expect(reviewIdx).toBeGreaterThanOrEqual(0);
@@ -55,25 +55,25 @@ describe("prompt comments rendering", () => {
 
   test("revision_requested not injected when started is more recent", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     tracker.recordEvent("i1", "revision_requested", "Fix tests", { note: "Fix the failing tests" });
     // Simulate a start event after revision_requested
     await new Promise((r) => setTimeout(r, 5));
     tracker.recordEvent("i1", "started", "Started", {});
     tracker.addComment("i1", { body: "context", author: "operator" });
 
-    const result = await renderPrompt("Do work", { }, { tracker, issueId: "i1" });
+    const result = await renderPrompt("Do work", { }, { tracker, issueUuid: "i1" });
     expect(result.text).not.toContain("Reviewer requested changes");
     expect(result.text).toContain("## Operator comments");
   });
 
   test("meta.commentIds matches injected comments", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     const c1 = tracker.addComment("i1", { body: "comment one" });
     const c2 = tracker.addComment("i1", { body: "comment two" });
 
-    const result = await renderPrompt("Do work", { }, { tracker, issueId: "i1" });
+    const result = await renderPrompt("Do work", { }, { tracker, issueUuid: "i1" });
     expect(result.meta.commentIds).toContain(c1.id);
     expect(result.meta.commentIds).toContain(c2.id);
     expect(result.meta.commentIds.length).toBe(2);

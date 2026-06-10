@@ -83,21 +83,21 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   buildSpawnInvocation(ctx: SpawnContext): SpawnInvocation {
-    const binary = ctx.binary ?? "claude";
     const argv = [
-      binary, "-p",
+      "-p",
       "--output-format", "stream-json",
       "--verbose",
       "--append-system-prompt-file", path.join(ctx.workspace, ".claude", "append-system-prompt.md"),
       "--mcp-config", path.join(ctx.workspace, ".mcp.json"),
+      "--permission-mode", ctx.config.permission_mode ?? "auto",
       "--allowedTools", "mcp__symphony__*",
-      "--permission-mode", "auto",
+      ...(ctx.config.permissions?.allow ?? []).flatMap(r => ["--allowedTools", r]),
+      ...(ctx.config.permissions?.deny ?? []).flatMap(r => ["--disallowedTools", r]),
+      ...(ctx.config.sandbox?.extra_writable_paths ?? []).flatMap(p => ["--add-dir", p]),
     ];
     const env: Record<string, string> = {
-      SYMPHONY_TOKEN: ctx.token,
-      SYMPHONY_ISSUE_ID: ctx.issueId,
+      SYMPHONY_ISSUE_UUID: ctx.issueUuid,
       SYMPHONY_WORKSPACE: ctx.workspace,
-      SYMPHONY_MCP_URL: ctx.mcpUrl,
     };
     return { argv, env };
   },
@@ -124,11 +124,15 @@ export const claudeCodeAdapter: AgentAdapter = {
 
     if (!envelope) return null;
 
+    // Check for transient API errors (400, 429, 500, 502, 503, 504) → needs_retry instead of abandoned
+    const apiStatus = (envelope as Record<string, unknown>).api_error_status;
+    const isTransientApiError = typeof apiStatus === "number" && [400, 429, 500, 502, 503, 504].includes(apiStatus);
+
     let result = parseLastJsonLine(envelope.result, AgentResultSummarySchema);
 
     if (!result) {
       result = {
-        status: envelope.is_error ? "abandoned" : "needs_retry",
+        status: (envelope.is_error && !isTransientApiError) ? "abandoned" : "needs_retry",
         reason: envelope.result.slice(0, 200),
       };
     }

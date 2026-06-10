@@ -19,7 +19,7 @@ function makeApp() {
 describe("comments routes", () => {
   test("POST /issues/:id/comments creates a comment", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments", {
       method: "POST",
@@ -32,12 +32,12 @@ describe("comments routes", () => {
     expect(comment.id).toBeTruthy();
     expect(comment.body).toBe("Hello world");
     expect(comment.author).toBe("operator");
-    expect(comment.issue_id).toBe("i1");
+    expect(comment.issue_uuid).toBe("i1");
   });
 
   test("POST /issues/:id/comments with custom author", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments", {
       method: "POST",
@@ -52,7 +52,7 @@ describe("comments routes", () => {
 
   test("POST /issues/:id/comments with empty body returns 400", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments", {
       method: "POST",
@@ -65,7 +65,7 @@ describe("comments routes", () => {
 
   test("POST /issues/:id/comments with body > 8000 chars returns 400", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments", {
       method: "POST",
@@ -90,7 +90,7 @@ describe("comments routes", () => {
 
   test("GET /issues/:id/comments returns comments in ts order", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     tracker.addComment("i1", { body: "first" });
     tracker.addComment("i1", { body: "second" });
 
@@ -110,7 +110,7 @@ describe("comments routes", () => {
 
   test("DELETE /issues/:id/comments/:commentId removes comment", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
     const comment = tracker.addComment("i1", { body: "to delete" });
 
     const res = await app.request(`/issues/i1/comments/${comment.id}`, { method: "DELETE" });
@@ -125,7 +125,7 @@ describe("comments routes", () => {
 
   test("DELETE /issues/:id/comments/:commentId is idempotent (non-existent returns 200 deleted=false)", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments/nonexistent", { method: "DELETE" });
     expect(res.status).toBe(200);
@@ -136,7 +136,7 @@ describe("comments routes", () => {
 
   test("POST /issues/:id/comments rejects unexpected fields (.strict())", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
     const res = await app.request("/issues/i1/comments", {
       method: "POST",
@@ -150,7 +150,7 @@ describe("comments routes", () => {
   describe("slash command directives", () => {
     test("/approve on plan_review issue approves the plan", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -165,7 +165,7 @@ describe("comments routes", () => {
 
     test("/lgtm on plan_review issue approves the plan", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -179,7 +179,7 @@ describe("comments routes", () => {
 
     test("/execute on plan_review issue approves the plan", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -193,7 +193,7 @@ describe("comments routes", () => {
 
     test("/revise on plan_review issue sends plan back to planning with note", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -208,7 +208,7 @@ describe("comments routes", () => {
 
     test("/skip-plan on todo issue transitions to in_progress", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "todo" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "todo" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -222,7 +222,7 @@ describe("comments routes", () => {
 
     test("/approve on non-plan_review issue is silently ignored", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "in_progress" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "in_progress" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -236,7 +236,7 @@ describe("comments routes", () => {
 
     test("/revise without note is silently ignored", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",
@@ -250,7 +250,7 @@ describe("comments routes", () => {
 
     test("regular comment is not treated as a command", async () => {
       const { app, tracker } = makeApp();
-      tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "plan_review" });
+      tracker.insertIssue({ uuid: "i1", title: "t", state: "plan_review" });
 
       const res = await app.request("/issues/i1/comments", {
         method: "POST",

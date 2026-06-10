@@ -53,30 +53,6 @@ function expandHome(p: string): string {
   return p;
 }
 
-async function syncSkillsIfMissing(wsPath: string): Promise<void> {
-  const skillsDir = path.join(wsPath, ".nano", "skills", "nano-symphony");
-  const marker = path.join(skillsDir, ".synced");
-  const srcSkillsDir = path.resolve(import.meta.dir, "../../skills/nano-symphony");
-
-  try {
-    // Check if already synced
-    await fs.stat(marker);
-  } catch {
-    // Not synced yet, copy skills
-    await fs.mkdir(skillsDir, { recursive: true });
-    try {
-      const skillFiles = await fs.readdir(srcSkillsDir);
-      for (const file of skillFiles) {
-        await fs.copyFile(path.join(srcSkillsDir, file), path.join(skillsDir, file));
-      }
-      // Mark as synced
-      await fs.writeFile(marker, new Date().toISOString(), "utf-8");
-    } catch {
-      // Skills directory may not exist in all environments
-    }
-  }
-}
-
 export interface EnsureResult {
   path: string;
   managed: boolean;
@@ -98,7 +74,6 @@ export async function ensureWorkspace(
       : path.resolve(root, expanded);
     // Create if missing (mkdir -p fallback for user convenience)
     await fs.mkdir(wsPath, { recursive: true });
-    await syncSkillsIfMissing(wsPath);
     return { path: wsPath, managed: false };   // external: do NOT init git
   }
 
@@ -107,7 +82,6 @@ export async function ensureWorkspace(
   const safe = sanitizeIdentifier(identifier);
   const wsPath = path.resolve(root, safe);
   await fs.mkdir(wsPath, { recursive: true });
-  await syncSkillsIfMissing(wsPath);
   if (gitBaseline) {
     await ensureGitBaseline(wsPath);
   }

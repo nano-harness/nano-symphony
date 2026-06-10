@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.x
       - name: Install dependencies
         timeout-minutes: 5
         run: |
@@ -27,41 +29,36 @@ jobs:
         run: cd frontend && npm run test
 
   build:
-    name: Build
+    name: Build bundle
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.x
+      - run: bun --version
       - name: Install dependencies
         timeout-minutes: 5
+        run: bun install --frozen-lockfile && (cd frontend && bun install --frozen-lockfile)
+      - name: Build bundle
+        run: VERSION=${GITHUB_REF_NAME#v} bash scripts/build-bundle.sh
+      - name: Smoke test bundle
+        shell: bash
         run: |
-          bun install --frozen-lockfile
-          cd frontend && bun install --frozen-lockfile
-      - name: Build frontend
-        run: bun run build
-      - name: Update package.json version
-        run: |
-          TAG=${{ github.ref_name }}
-          VERSION=${TAG#v}
-          VERSION="${VERSION}" bun -e "const pkg = await Bun.file('package.json').json(); pkg.version = process.env.VERSION; await Bun.write('package.json', JSON.stringify(pkg, null, 2) + '\n');"
-          echo "Updated package.json version to: $(bun -e "console.log((await Bun.file('package.json').json()).version)")"
-      - name: Create archive
-        run: |
-          TAG=${{ github.ref_name }}
-          mkdir -p archive
-          tar -czf archive/nano-symphony-${TAG}.tar.gz \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='archive' \
-            .
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          mkdir -p /tmp/smoke
+          tar -xzf "dist/nano-symphony-${GITHUB_REF_NAME#v}.tar.gz" -C /tmp/smoke
+          SYMPHONY_SHARE_ROOT=/tmp/smoke/share bun /tmp/smoke/index.js &
+          SERVER_PID=$!
+          sleep 3
+          curl -fsS http://localhost:4123/api/v1/health || { kill $SERVER_PID; exit 1; }
+          kill $SERVER_PID
+      - uses: actions/upload-artifact@v4
         with:
-          name: nano-symphony-archive
-          path: archive/nano-symphony-*.tar.gz
+          name: nano-symphony-bundle
+          path: dist/nano-symphony-*
           retention-days: 1
 
   release:
@@ -75,17 +72,13 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: nano-symphony-archive
+          name: nano-symphony-bundle
           path: dist/
-      - name: Generate checksum
-        run: |
-          TAG=${{ github.ref_name }}
-          cd dist
-          sha256sum nano-symphony-${TAG}.tar.gz > nano-symphony-${TAG}.tar.gz.sha256
       - name: Generate release metadata
         run: |
           TAG=${{ github.ref_name }}
           VERSION=${TAG#v}
+          BUN_VERSION="1.2.x"
           PUBLIC_BASE_URL="https://binary-releases.oss-cn-hangzhou.aliyuncs.com/symphony"
           cat > dist/meta.json <<EOF
           {
@@ -93,9 +86,10 @@ jobs:
             "tag": "${TAG}",
             "latest_archive_url": "${PUBLIC_BASE_URL}/latest/nano-symphony.tar.gz",
             "latest_checksum_url": "${PUBLIC_BASE_URL}/latest/nano-symphony.tar.gz.sha256",
-            "versioned_archive_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${TAG}.tar.gz",
-            "versioned_checksum_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${TAG}.tar.gz.sha256",
-            "install_script_url": "${PUBLIC_BASE_URL}/install.sh"
+            "versioned_archive_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${VERSION}.tar.gz",
+            "versioned_checksum_url": "${PUBLIC_BASE_URL}/releases/${TAG}/nano-symphony-${VERSION}.tar.gz.sha256",
+            "install_script_url": "${PUBLIC_BASE_URL}/install.sh",
+            "built_with": "bun-${BUN_VERSION}"
           }
           EOF
       - name: Create GitHub Release
@@ -118,8 +112,9 @@ jobs:
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: |
           TAG=${{ github.ref_name }}
-          ossutil cp dist/nano-symphony-${TAG}.tar.gz oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${TAG}.tar.gz --force --region cn-hangzhou
-          ossutil cp dist/nano-symphony-${TAG}.tar.gz.sha256 oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${TAG}.tar.gz.sha256 --force --region cn-hangzhou
+          VERSION=${TAG#v}
+          ossutil cp dist/nano-symphony-${VERSION}.tar.gz oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${VERSION}.tar.gz --force --region cn-hangzhou
+          ossutil cp dist/nano-symphony-${VERSION}.tar.gz.sha256 oss://${{ secrets.OSS_BUCKET }}/symphony/releases/${TAG}/nano-symphony-${VERSION}.tar.gz.sha256 --force --region cn-hangzhou
       - name: Upload archive to OSS (latest)
         env:
           OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
@@ -127,13 +122,15 @@ jobs:
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: |
           TAG=${{ github.ref_name }}
-          # Prepare latest artifacts: use unversioned filename and regenerate checksum
-          cp dist/nano-symphony-${TAG}.tar.gz dist/nano-symphony.tar.gz
+          VERSION=${TAG#v}
+          cp dist/nano-symphony-${VERSION}.tar.gz dist/nano-symphony.tar.gz
           (cd dist && sha256sum nano-symphony.tar.gz > nano-symphony.tar.gz.sha256)
           ossutil cp dist/nano-symphony.tar.gz oss://${{ secrets.OSS_BUCKET }}/symphony/latest/nano-symphony.tar.gz --force --region cn-hangzhou
           ossutil cp dist/nano-symphony.tar.gz.sha256 oss://${{ secrets.OSS_BUCKET }}/symphony/latest/nano-symphony.tar.gz.sha256 --force --region cn-hangzhou
           ossutil cp dist/meta.json oss://${{ secrets.OSS_BUCKET }}/symphony/meta.json --force --region cn-hangzhou
 
+  # TODO(post-bundle-ship): consider removing this job after confirming
+  # no external consumers depend on direct OSS skill path.
   publish-skill:
     name: Publish Skill to OSS
     needs: build
@@ -185,3 +182,4 @@ jobs:
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: |
           ossutil cp install.sh oss://${{ secrets.OSS_BUCKET }}/symphony/install.sh --force --region cn-hangzhou
+

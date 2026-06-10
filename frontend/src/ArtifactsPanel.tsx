@@ -2,7 +2,7 @@ import { createSignal, Show, For, createEffect } from "solid-js";
 import { api, type Artifact } from "./api";
 
 interface ArtifactsPanelProps {
-  issueId: string;
+  issueUuid: string;
   maxAttempt: number;
 }
 
@@ -21,7 +21,7 @@ export function ArtifactsPanel(props: ArtifactsPanelProps) {
   const loadArtifacts = async () => {
     setLoading(true);
     try {
-      const list = await api.listArtifacts(props.issueId, selectedAttempt());
+      const list = await api.listArtifacts(props.issueUuid, selectedAttempt());
       setArtifacts(list);
     } catch {
       setArtifacts([]);
@@ -79,7 +79,7 @@ export function ArtifactsPanel(props: ArtifactsPanelProps) {
 
   const downloadURL = (artifact: Artifact) => {
     if (artifact.content_size === 0 && artifact.path) {
-      return api.fileURL(props.issueId, artifact.path);
+      return api.fileURL(props.issueUuid, artifact.path);
     }
     return api.artifactRawURL(artifact.id);
   };

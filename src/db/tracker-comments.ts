@@ -4,24 +4,24 @@ import type { Comment } from "./tracker-types.ts";
 
 export function createCommentOps(db: Database) {
   const insertCommentStmt = db.prepare(`
-    INSERT INTO issue_comments (id, issue_id, ts, author, body, metadata_json)
+    INSERT INTO issue_comments (id, issue_uuid, ts, author, body, metadata_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const listCommentsStmt = db.prepare(`
-    SELECT * FROM issue_comments WHERE issue_id = ? ORDER BY ts ASC
+    SELECT * FROM issue_comments WHERE issue_uuid = ? ORDER BY ts ASC
   `);
 
   const listCommentsSinceStmt = db.prepare(`
-    SELECT * FROM issue_comments WHERE issue_id = ? AND ts > ? ORDER BY ts ASC
+    SELECT * FROM issue_comments WHERE issue_uuid = ? AND ts > ? ORDER BY ts ASC
   `);
 
   const listCommentsLimitStmt = db.prepare(`
-    SELECT * FROM issue_comments WHERE issue_id = ? ORDER BY ts ASC LIMIT ?
+    SELECT * FROM issue_comments WHERE issue_uuid = ? ORDER BY ts ASC LIMIT ?
   `);
 
   const listCommentsSinceLimitStmt = db.prepare(`
-    SELECT * FROM issue_comments WHERE issue_id = ? AND ts > ? ORDER BY ts ASC LIMIT ?
+    SELECT * FROM issue_comments WHERE issue_uuid = ? AND ts > ? ORDER BY ts ASC LIMIT ?
   `);
 
   const getCommentStmt = db.prepare(`
@@ -33,33 +33,33 @@ export function createCommentOps(db: Database) {
   `);
 
   const countCommentsStmt = db.prepare(`
-    SELECT COUNT(*) as count FROM issue_comments WHERE issue_id = ?
+    SELECT COUNT(*) as count FROM issue_comments WHERE issue_uuid = ?
   `);
 
-  function addComment(issueId: string, input: { body: string; author?: string; metadata?: unknown }): Comment {
+  function addComment(issueUuid: string, input: { body: string; author?: string; metadata?: unknown }): Comment {
     const id = nanoid();
     const ts = Date.now();
     const author = input.author || "operator";
     const metadataJson = input.metadata !== undefined ? JSON.stringify(input.metadata) : null;
-    insertCommentStmt.run(id, issueId, ts, author, input.body, metadataJson);
-    const comment: Comment = { id, issue_id: issueId, ts, author, body: input.body, metadata: input.metadata ?? null };
+    insertCommentStmt.run(id, issueUuid, ts, author, input.body, metadataJson);
+    const comment: Comment = { id, issue_uuid: issueUuid, ts, author, body: input.body, metadata: input.metadata ?? null };
     return comment;
   }
 
-  function listComments(issueId: string, opts?: { since?: number; limit?: number }): Comment[] {
-    let rows: Array<{ id: string; issue_id: string; ts: number; author: string; body: string; metadata_json: string | null }>;
+  function listComments(issueUuid: string, opts?: { since?: number; limit?: number }): Comment[] {
+    let rows: Array<{ id: string; issue_uuid: string; ts: number; author: string; body: string; metadata_json: string | null }>;
     if (opts?.since && opts?.limit) {
-      rows = listCommentsSinceLimitStmt.all(issueId, opts.since, opts.limit) as typeof rows;
+      rows = listCommentsSinceLimitStmt.all(issueUuid, opts.since, opts.limit) as typeof rows;
     } else if (opts?.since) {
-      rows = listCommentsSinceStmt.all(issueId, opts.since) as typeof rows;
+      rows = listCommentsSinceStmt.all(issueUuid, opts.since) as typeof rows;
     } else if (opts?.limit) {
-      rows = listCommentsLimitStmt.all(issueId, opts.limit) as typeof rows;
+      rows = listCommentsLimitStmt.all(issueUuid, opts.limit) as typeof rows;
     } else {
-      rows = listCommentsStmt.all(issueId) as typeof rows;
+      rows = listCommentsStmt.all(issueUuid) as typeof rows;
     }
     return rows.map((r) => ({
       id: r.id,
-      issue_id: r.issue_id,
+      issue_uuid: r.issue_uuid,
       ts: r.ts,
       author: r.author,
       body: r.body,
@@ -68,9 +68,9 @@ export function createCommentOps(db: Database) {
   }
 
   function getComment(commentId: string): Comment | null {
-    const row = getCommentStmt.get(commentId) as { id: string; issue_id: string; ts: number; author: string; body: string; metadata_json: string | null } | null;
+    const row = getCommentStmt.get(commentId) as { id: string; issue_uuid: string; ts: number; author: string; body: string; metadata_json: string | null } | null;
     if (!row) return null;
-    return { id: row.id, issue_id: row.issue_id, ts: row.ts, author: row.author, body: row.body, metadata: row.metadata_json ? JSON.parse(row.metadata_json) : null };
+    return { id: row.id, issue_uuid: row.issue_uuid, ts: row.ts, author: row.author, body: row.body, metadata: row.metadata_json ? JSON.parse(row.metadata_json) : null };
   }
 
   function deleteComment(commentId: string): boolean {
@@ -78,8 +78,8 @@ export function createCommentOps(db: Database) {
     return result.changes > 0;
   }
 
-  function countComments(issueId: string): number {
-    const row = countCommentsStmt.get(issueId) as { count: number };
+  function countComments(issueUuid: string): number {
+    const row = countCommentsStmt.get(issueUuid) as { count: number };
     return row.count;
   }
 

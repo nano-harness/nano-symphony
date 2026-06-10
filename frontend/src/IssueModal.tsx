@@ -23,6 +23,11 @@ export function IssueModal(props: IssueModalProps) {
   const [labels, setLabels] = createSignal((props.issue?.labels || []).join(", "));
   const [workspacePath, setWorkspacePath] = createSignal(props.issue?.workspace_path || "");
   const [agentKind, setAgentKind] = createSignal<string>(props.issue?.agent_kind ?? "");
+  const [requirePlan, setRequirePlan] = createSignal<string>(
+    props.issue?.require_plan === true ? "true"
+      : props.issue?.require_plan === false ? "false"
+      : ""
+  );
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [touched, setTouched] = createSignal({ title: false });
@@ -51,6 +56,7 @@ export function IssueModal(props: IssueModalProps) {
         state: state(),
         workspace_path: workspacePath().trim() || undefined,
         agent_kind: agentKind() === "" ? null : (agentKind() as "nano" | "claude-code"),
+        require_plan: requirePlan() === "" ? null : requirePlan() === "true",
         labels: labels()
           .split(",")
           .map((l) => l.trim())
@@ -58,7 +64,7 @@ export function IssueModal(props: IssueModalProps) {
       };
 
       if (isEdit()) {
-        await api.updateIssue(props.issue!.id, data);
+        await api.updateIssue(props.issue!.uuid, data);
       } else {
         await api.createIssue(data);
       }
@@ -154,11 +160,13 @@ export function IssueModal(props: IssueModalProps) {
                   value={state()}
                   onChange={(e) => setState(e.currentTarget.value)}
                 >
+                  <option value="backlog">Backlog</option>
                   <option value="todo">To Do</option>
+                  <option value="planning">Planning</option>
+                  <option value="plan_review">Plan Review</option>
                   <option value="in_progress">In Progress</option>
                   <option value="in_review">In Review</option>
                   <option value="done">Done</option>
-                  <option value="backlog">Backlog</option>
                   <option value="cancelled">Cancelled</option>
                 </select>
               </div>
@@ -183,6 +191,22 @@ export function IssueModal(props: IssueModalProps) {
                       </option>
                     )}
                   </For>
+                </select>
+              </div>
+
+              <div class="form-field">
+                <label class="form-label" for="require_plan">
+                  Planning
+                </label>
+                <select
+                  id="require_plan"
+                  class="form-select"
+                  value={requirePlan()}
+                  onChange={(e) => setRequirePlan(e.currentTarget.value)}
+                >
+                  <option value="">Workflow default</option>
+                  <option value="true">Require plan</option>
+                  <option value="false">Skip planning</option>
                 </select>
               </div>
             </div>

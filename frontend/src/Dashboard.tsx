@@ -10,6 +10,8 @@ const VIEW_STORAGE_KEY = "symphony.dashboardView";
 const BOARD_COLUMNS: Array<{ state: string; label: string }> = [
   { state: "backlog",     label: "BACKLOG" },
   { state: "todo",        label: "TODO" },
+  { state: "planning",    label: "PLANNING" },
+  { state: "plan_review", label: "PLAN REVIEW" },
   { state: "in_progress", label: "IN PROGRESS" },
   { state: "in_review",   label: "IN REVIEW" },
   { state: "done",        label: "DONE" },
@@ -51,9 +53,9 @@ export function Dashboard() {
     es.addEventListener("message", (e) => {
       try {
         const event = JSON.parse(e.data);
-        const visibleIds = new Set(issues().map((i) => i.id));
+        const visibleIds = new Set(issues().map((i) => i.uuid));
         // Reload if event affects visible issue or is a state change
-        if (visibleIds.has(event.issue_id) || event.kind === "state_changed") {
+        if (visibleIds.has(event.issue_uuid) || event.kind === "state_changed") {
           load();
         }
       } catch {
@@ -63,9 +65,9 @@ export function Dashboard() {
     es.addEventListener("run", (e) => {
       try {
         const runPatch = JSON.parse(e.data);
-        const visibleIds = new Set(issues().map((i) => i.id));
+        const visibleIds = new Set(issues().map((i) => i.uuid));
         // Reload if run event affects visible issue
-        if (visibleIds.has(runPatch.issue_id)) {
+        if (visibleIds.has(runPatch.issue_uuid)) {
           load();
         }
       } catch {
@@ -231,7 +233,7 @@ export function Dashboard() {
                   <li
                     class="bar"
                     style={{ "animation-delay": `${index() * 28}ms` }}
-                    onClick={() => navigate(`/issues/${issue.id}`)}
+                    onClick={() => navigate(`/issues/${issue.uuid}`)}
                   >
                     <div class="bar-num">{index() + 1}</div>
                     <div class="bar-title">{issue.title}</div>
@@ -254,7 +256,7 @@ export function Dashboard() {
                       </button>
                       <button
                         class="icon-btn"
-                        onClick={() => confirmDelete(issue.id)}
+                        onClick={() => confirmDelete(issue.uuid)}
                         title="Delete issue"
                       >
                         ×
@@ -296,7 +298,7 @@ export function Dashboard() {
               <For each={recentArtifacts()}>
                 {(a) => (
                   <li class="artifact-global-row">
-                    <A href={`/issues/${a.issue_id}`}>
+                    <A href={`/issues/${a.issue_uuid}`}>
                       <span class="artifact-label">{a.label ?? a.kind}</span>
                       <span class="artifact-meta">
                         <span class={`artifact-kind ${a.kind}`}>{a.kind.replace(/_/g, " ")}</span>
@@ -384,7 +386,7 @@ function BoardView(props: {
                   {(issue) => (
                     <div
                       class="board-card"
-                      onClick={() => props.onCardClick(issue.id)}
+                      onClick={() => props.onCardClick(issue.uuid)}
                     >
                       <div class="board-card-title">{issue.title}</div>
                       <div class="board-card-meta">
@@ -393,7 +395,7 @@ function BoardView(props: {
                       </div>
                       <div class="board-card-actions" onClick={(e) => e.stopPropagation()}>
                         <button class="icon-btn" onClick={() => props.onEdit(issue)} title="Edit">✎</button>
-                        <button class="icon-btn" onClick={() => props.onDelete(issue.id)} title="Delete">×</button>
+                        <button class="icon-btn" onClick={() => props.onDelete(issue.uuid)} title="Delete">×</button>
                       </div>
                     </div>
                   )}

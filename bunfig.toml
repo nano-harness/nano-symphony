@@ -3,3 +3,4 @@
 # Bun resolves paths relative to each package, so we use wildcards
 exclude = ["**/frontend/**/*", "frontend/**"]
 timeout = 60000
+preload = ["./tests/test-setup.ts"]

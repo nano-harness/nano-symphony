@@ -53,6 +53,9 @@ export const EVENT_KINDS = {
   issue_created: "Child issue created",
   issue_activated: "Issue activated for scheduling",
 
+  // Plan run lifecycle
+  plan_run_failed: "Plan run failed with context",
+
   // System
   error: "Error occurred",
   workflow_reloaded: "Workflow file reloaded",

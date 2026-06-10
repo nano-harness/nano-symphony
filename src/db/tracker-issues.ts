@@ -1,62 +1,89 @@
 import type { Database } from "bun:sqlite";
 import type { Issue, IssueInput } from "./tracker-types.ts";
+import { WAIT_STATES } from "./wait-states.ts";
 
-export function hydrateIssueRow(base: Record<string, unknown>): Omit<Issue, "labels" | "blockers"> {
-  return base as Omit<Issue, "labels" | "blockers">;
+type IssueRow = Omit<Issue, "labels" | "blockers" | "identifier">;
+
+export function hydrateIssueRow(base: Record<string, unknown>): IssueRow {
+  const raw = base as Record<string, unknown>;
+  const rp = raw["require_plan"];
+  return {
+    ...(raw as IssueRow),
+    id: Number(raw["id"]),
+    require_plan: rp === 1 ? true : rp === 0 ? false : null,
+    plan_run_id: (raw["plan_run_id"] as string | null) ?? null,
+    expected_schema: (raw["expected_schema"] as string | null) ?? null,
+    scratchpad: (raw["scratchpad"] as string | null) ?? null,
+    agent_binary: (raw["agent_binary"] as string | null) ?? null,
+  };
+}
+
+export function serializeIssue(
+  row: IssueRow & { labels: string[]; blockers: Array<{ blocker_uuid: string; blocker_state: string }> },
+): Issue {
+  return { ...row, identifier: `TASK-${row.id}` };
 }
 
 export function createIssueOps(db: Database) {
   const insertIssueStmt = db.prepare(`
-    INSERT OR REPLACE INTO issues (id, identifier, title, description, priority, state, branch, url, workspace_path, agent_kind, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO issues (uuid, title, description, priority, state, branch, url, workspace_path, agent_kind, agent_binary, require_plan, plan_run_id, expected_schema, scratchpad, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const updateIssueStmt = db.prepare(`
+    UPDATE issues
+    SET title = ?, description = ?, priority = ?, state = ?, branch = ?, url = ?,
+        workspace_path = ?, agent_kind = ?, agent_binary = ?, require_plan = ?, plan_run_id = ?,
+        expected_schema = ?, scratchpad = ?, updated_at = ?
+    WHERE uuid = ?
   `);
 
   const insertLabelStmt = db.prepare(`
-    INSERT OR IGNORE INTO issue_labels (issue_id, label) VALUES (?, ?)
+    INSERT OR IGNORE INTO issue_labels (issue_uuid, label) VALUES (?, ?)
   `);
 
   const deleteLabelStmt = db.prepare(`
-    DELETE FROM issue_labels WHERE issue_id = ?
+    DELETE FROM issue_labels WHERE issue_uuid = ?
   `);
 
   const deleteIssueStmt = db.prepare(`
-    DELETE FROM issues WHERE id = ?
+    DELETE FROM issues WHERE uuid = ?
   `);
 
   const getWorkspaceStmt = db.prepare(`
-    SELECT workspace_path, workspace_managed FROM symphony_runs WHERE issue_id = ?
+    SELECT workspace_path, workspace_managed FROM symphony_runs WHERE issue_uuid = ?
   `);
 
   const deleteIssueRunStmt = db.prepare(`
-    DELETE FROM symphony_runs WHERE issue_id = ?
+    DELETE FROM symphony_runs WHERE issue_uuid = ?
   `);
 
   const deleteIssueEventsStmt = db.prepare(`
-    DELETE FROM symphony_events WHERE issue_id = ?
+    DELETE FROM symphony_events WHERE issue_uuid = ?
   `);
 
   const deleteIssueBlockersStmt = db.prepare(`
-    DELETE FROM issue_blockers WHERE issue_id = ? OR blocker_id = ?
+    DELETE FROM issue_blockers WHERE issue_uuid = ? OR blocker_uuid = ?
   `);
 
   const deleteIssueCommentsStmt = db.prepare(`
-    DELETE FROM issue_comments WHERE issue_id = ?
+    DELETE FROM issue_comments WHERE issue_uuid = ?
   `);
 
   const deleteIssueArtifactsStmt = db.prepare(`
-    DELETE FROM symphony_artifacts WHERE issue_id = ?
+    DELETE FROM symphony_artifacts WHERE issue_uuid = ?
   `);
 
   const getIssueBaseStmt = db.prepare(`
-    SELECT * FROM issues WHERE id = ?
+    SELECT * FROM issues WHERE uuid = ?
   `);
 
   const getLabelsStmt = db.prepare(`
-    SELECT label FROM issue_labels WHERE issue_id = ?
+    SELECT label FROM issue_labels WHERE issue_uuid = ?
   `);
 
   const getBlockersStmt = db.prepare(`
-    SELECT blocker_id, blocker_state FROM issue_blockers WHERE issue_id = ?
+    SELECT blocker_uuid, blocker_state FROM issue_blockers WHERE issue_uuid = ?
   `);
 
   const listIssuesStmt = db.prepare(`
@@ -67,36 +94,42 @@ export function createIssueOps(db: Database) {
     SELECT * FROM issues WHERE state = ? ORDER BY created_at DESC
   `);
 
-  const getNextTaskNumStmt = db.prepare(`
-    SELECT MAX(CAST(SUBSTR(identifier, 6) AS INTEGER)) AS max_n
-    FROM issues
-    WHERE identifier GLOB 'TASK-[0-9]*'
+  const listIssuesByPlanRunStmt = db.prepare(`
+    SELECT * FROM issues WHERE plan_run_id = ? ORDER BY created_at ASC
   `);
 
   const updateIssueStateStmt = db.prepare(`
-    UPDATE issues SET state = ?, updated_at = ? WHERE id = ?
+    UPDATE issues SET state = ?, updated_at = ? WHERE uuid = ?
+  `);
+
+  const updateIssuePlanRunIdStmt = db.prepare(`
+    UPDATE issues SET plan_run_id = ?, updated_at = ? WHERE uuid = ?
+  `);
+
+  const updateIssueScratchpadStmt = db.prepare(`
+    UPDATE issues SET scratchpad = ?, updated_at = ? WHERE uuid = ?
   `);
 
   const insertBlockerStmt = db.prepare(`
-    INSERT OR REPLACE INTO issue_blockers (issue_id, blocker_id, blocker_state)
+    INSERT OR REPLACE INTO issue_blockers (issue_uuid, blocker_uuid, blocker_state)
     VALUES (?, ?, ?)
   `);
 
   const updateLastBlockerFingerprintStmt = db.prepare(`
-    UPDATE issues SET last_blocker_fingerprint = ? WHERE id = ?
+    UPDATE issues SET last_blocker_fingerprint = ? WHERE uuid = ?
   `);
 
   const getLastBlockerFingerprintStmt = db.prepare(`
-    SELECT last_blocker_fingerprint FROM issues WHERE id = ?
+    SELECT last_blocker_fingerprint FROM issues WHERE uuid = ?
   `);
 
   const getCandidatesStmt = db.prepare(`
     SELECT issues.*
     FROM issues
-    LEFT JOIN symphony_runs ON issues.id = symphony_runs.issue_id
-    WHERE issues.state NOT IN ('done', 'cancelled', 'backlog', 'plan_review')
+    LEFT JOIN symphony_runs ON issues.uuid = symphony_runs.issue_uuid
+    WHERE issues.state NOT IN ('done', 'cancelled', 'backlog', 'plan_review', ${WAIT_STATES.map(() => "?").join(", ")})
       AND (
-        symphony_runs.issue_id IS NULL
+        symphony_runs.issue_uuid IS NULL
         OR (
           symphony_runs.last_state IN ('released', 'retry_queued')
           AND (
@@ -111,8 +144,8 @@ export function createIssueOps(db: Database) {
         OR symphony_runs.next_due_ts IS NULL
         OR symphony_runs.next_due_ts <= ?
       )
-      AND issues.id NOT IN (
-        SELECT issue_id FROM issue_blockers
+      AND issues.uuid NOT IN (
+        SELECT issue_uuid FROM issue_blockers
         WHERE blocker_state NOT IN ('done', 'cancelled')
       )
     ORDER BY
@@ -127,25 +160,20 @@ export function createIssueOps(db: Database) {
     LIMIT ?
   `);
 
-  function getIssue(id: string): Issue | null {
-    const raw = getIssueBaseStmt.get(id) as Record<string, unknown> | null;
+  function getIssue(uuid: string): Issue | null {
+    const raw = getIssueBaseStmt.get(uuid) as Record<string, unknown> | null;
     if (!raw) return null;
     const base = hydrateIssueRow(raw);
-    const labels = (getLabelsStmt.all(id) as { label: string }[]).map((r) => r.label);
-    const blockers = getBlockersStmt.all(id) as Array<{ blocker_id: string; blocker_state: string }>;
-    return { ...base, labels, blockers };
+    const labels = (getLabelsStmt.all(uuid) as { label: string }[]).map((r) => r.label);
+    const blockers = getBlockersStmt.all(uuid) as Array<{ blocker_uuid: string; blocker_state: string }>;
+    return serializeIssue({ ...base, labels, blockers });
   }
 
-  function getNextTaskNumber(): number {
-    const row = getNextTaskNumStmt.get() as { max_n: number | null } | null;
-    return (row?.max_n ?? 0) + 1;
-  }
-
-  function insertIssue(issue: IssueInput): void {
+  function insertIssue(issue: IssueInput): Issue {
     const now = new Date().toISOString();
+    const requirePlan = issue.require_plan === true ? 1 : issue.require_plan === false ? 0 : null;
     insertIssueStmt.run(
-      issue.id,
-      issue.identifier,
+      issue.uuid,
       issue.title,
       issue.description ?? null,
       issue.priority ?? "medium",
@@ -154,21 +182,65 @@ export function createIssueOps(db: Database) {
       issue.url ?? null,
       issue.workspace_path ?? null,
       issue.agent_kind ?? null,
+      issue.agent_binary ?? null,
+      requirePlan,
+      issue.plan_run_id ?? null,
+      issue.expected_schema ?? null,
+      issue.scratchpad ?? null,
       (issue as { created_at?: string }).created_at ?? now,
       (issue as { updated_at?: string }).updated_at ?? now,
     );
-    deleteLabelStmt.run(issue.id);
+    deleteLabelStmt.run(issue.uuid);
     for (const label of issue.labels ?? []) {
-      insertLabelStmt.run(issue.id, label);
+      insertLabelStmt.run(issue.uuid, label);
     }
+    const created = getIssue(issue.uuid);
+    if (!created) throw new Error(`Issue ${issue.uuid} not found after creation`);
+    return created;
   }
 
-  function insertBlocker(issueId: string, blockerId: string, blockerState: string): void {
-    insertBlockerStmt.run(issueId, blockerId, blockerState);
+  function updateIssue(uuid: string, patch: Omit<IssueInput, "uuid"> & { updated_at?: string }): Issue | null {
+    if (!getIssueBaseStmt.get(uuid)) return null;
+    const now = new Date().toISOString();
+    const requirePlan = patch.require_plan === true ? 1 : patch.require_plan === false ? 0 : null;
+    updateIssueStmt.run(
+      patch.title,
+      patch.description ?? null,
+      patch.priority ?? "medium",
+      patch.state,
+      patch.branch ?? null,
+      patch.url ?? null,
+      patch.workspace_path ?? null,
+      patch.agent_kind ?? null,
+      patch.agent_binary ?? null,
+      requirePlan,
+      patch.plan_run_id ?? null,
+      patch.expected_schema ?? null,
+      patch.scratchpad ?? null,
+      patch.updated_at ?? now,
+      uuid,
+    );
+    if (patch.labels !== undefined) {
+      deleteLabelStmt.run(uuid);
+      for (const label of patch.labels) insertLabelStmt.run(uuid, label);
+    }
+    return getIssue(uuid);
   }
 
-  function updateIssueState(issueId: string, newState: string): void {
-    updateIssueStateStmt.run(newState, new Date().toISOString(), issueId);
+  function insertBlocker(issueUuid: string, blockerUuid: string, blockerState: string): void {
+    insertBlockerStmt.run(issueUuid, blockerUuid, blockerState);
+  }
+
+  function updateIssueState(issueUuid: string, newState: string): void {
+    updateIssueStateStmt.run(newState, new Date().toISOString(), issueUuid);
+  }
+
+  function updateIssuePlanRunId(issueUuid: string, planRunId: string | null): void {
+    updateIssuePlanRunIdStmt.run(planRunId, new Date().toISOString(), issueUuid);
+  }
+
+  function updateIssueScratchpad(issueUuid: string, scratchpad: string | null): void {
+    updateIssueScratchpadStmt.run(scratchpad, new Date().toISOString(), issueUuid);
   }
 
   function listIssues(filter?: { state?: string }): Issue[] {
@@ -180,27 +252,38 @@ export function createIssueOps(db: Database) {
     }
     return rows.map((raw) => {
       const row = hydrateIssueRow(raw);
-      const labels = (getLabelsStmt.all(row.id) as { label: string }[]).map((r) => r.label);
-      const blockers = getBlockersStmt.all(row.id) as Array<{ blocker_id: string; blocker_state: string }>;
-      return { ...row, labels, blockers };
+      const labels = (getLabelsStmt.all(row.uuid) as { label: string }[]).map((r) => r.label);
+      const blockers = getBlockersStmt.all(row.uuid) as Array<{ blocker_uuid: string; blocker_state: string }>;
+      return serializeIssue({ ...row, labels, blockers });
+    });
+  }
+
+  function listIssuesByPlanRun(planRunId: string): Issue[] {
+    const rows = listIssuesByPlanRunStmt.all(planRunId) as Record<string, unknown>[];
+    return rows.map((raw) => {
+      const row = hydrateIssueRow(raw);
+      const labels = (getLabelsStmt.all(row.uuid) as { label: string }[]).map((r) => r.label);
+      const blockers = getBlockersStmt.all(row.uuid) as Array<{ blocker_uuid: string; blocker_state: string }>;
+      return serializeIssue({ ...row, labels, blockers });
     });
   }
 
   function getCandidates(limit: number): Issue[] {
     const now = Date.now();
-    const rows = getCandidatesStmt.all(now, limit) as Record<string, unknown>[];
+    // Parameters: [...WAIT_STATES for NOT IN, now for next_due_ts, limit]
+    const rows = getCandidatesStmt.all(...WAIT_STATES, now, limit) as Record<string, unknown>[];
     return rows.map((raw) => {
       const row = hydrateIssueRow(raw);
-      const labels = (getLabelsStmt.all(row.id) as { label: string }[]).map((r) => r.label);
-      const blockers = getBlockersStmt.all(row.id) as Array<{ blocker_id: string; blocker_state: string }>;
-      return { ...row, labels, blockers };
+      const labels = (getLabelsStmt.all(row.uuid) as { label: string }[]).map((r) => r.label);
+      const blockers = getBlockersStmt.all(row.uuid) as Array<{ blocker_uuid: string; blocker_state: string }>;
+      return serializeIssue({ ...row, labels, blockers });
     });
   }
 
-  function deleteIssue(id: string): { deleted: boolean; workspace?: { path: string; managed: boolean } } {
-    if (!getIssueBaseStmt.get(id)) return { deleted: false };
+  function deleteIssue(uuid: string): { deleted: boolean; workspace?: { path: string; managed: boolean } } {
+    if (!getIssueBaseStmt.get(uuid)) return { deleted: false };
     // Read workspace info before the transaction deletes the run row
-    const wsRow = getWorkspaceStmt.get(id) as { workspace_path: string | null; workspace_managed: number | null } | null;
+    const wsRow = getWorkspaceStmt.get(uuid) as { workspace_path: string | null; workspace_managed: number | null } | null;
     const workspace =
       wsRow?.workspace_path
         ? { path: wsRow.workspace_path, managed: wsRow.workspace_managed === 1 }
@@ -208,34 +291,37 @@ export function createIssueOps(db: Database) {
     // A4: Wrap all 7-table delete in a single transaction to prevent orphaned
     // rows if the process is interrupted mid-delete.
     const deleteAll = db.transaction(() => {
-      deleteLabelStmt.run(id);
-      deleteIssueBlockersStmt.run(id, id);
-      deleteIssueEventsStmt.run(id);
-      deleteIssueCommentsStmt.run(id);
-      deleteIssueArtifactsStmt.run(id);
-      deleteIssueRunStmt.run(id);
-      deleteIssueStmt.run(id);
+      deleteLabelStmt.run(uuid);
+      deleteIssueBlockersStmt.run(uuid, uuid);
+      deleteIssueEventsStmt.run(uuid);
+      deleteIssueCommentsStmt.run(uuid);
+      deleteIssueArtifactsStmt.run(uuid);
+      deleteIssueRunStmt.run(uuid);
+      deleteIssueStmt.run(uuid);
     });
     deleteAll();
     return { deleted: true, workspace };
   }
 
-  function updateLastBlockerFingerprint(issueId: string, fingerprint: string | null): void {
-    updateLastBlockerFingerprintStmt.run(fingerprint, issueId);
+  function updateLastBlockerFingerprint(issueUuid: string, fingerprint: string | null): void {
+    updateLastBlockerFingerprintStmt.run(fingerprint, issueUuid);
   }
 
-  function getLastBlockerFingerprint(issueId: string): string | null {
-    const row = getLastBlockerFingerprintStmt.get(issueId) as { last_blocker_fingerprint: string | null } | null;
+  function getLastBlockerFingerprint(issueUuid: string): string | null {
+    const row = getLastBlockerFingerprintStmt.get(issueUuid) as { last_blocker_fingerprint: string | null } | null;
     return row?.last_blocker_fingerprint ?? null;
   }
 
   return {
     getIssue,
-    getNextTaskNumber,
     insertIssue,
+    updateIssue,
     insertBlocker,
     updateIssueState,
+    updateIssuePlanRunId,
+    updateIssueScratchpad,
     listIssues,
+    listIssuesByPlanRun,
     getCandidates,
     deleteIssue,
     updateLastBlockerFingerprint,

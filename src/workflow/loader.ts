@@ -20,6 +20,34 @@ export function loadWorkflow(filePath: string): { workflow: Workflow; template: 
     );
   }
 
+  // Validate that all variable references use known namespaces.
+  // Liquid variables look like {{ var }} or {% if var %} etc.
+  // Known top-level variables: issue, attempt
+  const KNOWN_NAMESPACES = new Set(["issue", "attempt"]);
+  const varRefPattern = /\{\{-?\s*([a-zA-Z_]\w*)/g;
+  const tagVarPattern = /\{%-?\s*(?:if|unless|for|assign|echo)\s+([a-zA-Z_]\w*)/g;
+  const unknownVars: string[] = [];
+
+  for (const pattern of [varRefPattern, tagVarPattern]) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      const varName = match[1];
+      // Skip liquid built-in keywords and known namespaces
+      if (KNOWN_NAMESPACES.has(varName)) continue;
+      if (["true", "false", "nil", "null", "blank", "empty", "forloop"].includes(varName)) continue;
+      unknownVars.push(varName);
+    }
+  }
+
+  if (unknownVars.length > 0) {
+    const unique = [...new Set(unknownVars)];
+    throw new Error(
+      `WORKFLOW.md template references unknown variables: ${unique.join(", ")}. ` +
+      `Available top-level variables are: ${[...KNOWN_NAMESPACES].join(", ")}. ` +
+      `Please check ${filePath}.`
+    );
+  }
+
   return { workflow, template: content };
 }
 

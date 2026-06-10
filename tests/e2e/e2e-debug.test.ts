@@ -34,6 +34,26 @@ describe("e2e debug", () => {
   );
 
   test(
+    "needs_retry with max_retries=0 triggers abandoned",
+    async () => {
+      const res = await runE2e({ mockSemantics: "needs_retry" });
+      expect(res.run.last_state).toBe("released");
+      expect(res.events.some((e) => e.kind === "abandoned")).toBe(true);
+    },
+    30_000
+  );
+
+  test(
+    "needs_retry with max_retries>0 triggers retry_scheduled",
+    async () => {
+      const res = await runE2e({ mockSemantics: "needs_retry", maxRetries: 2 });
+      expect(res.run.last_state).toBe("retry_queued");
+      expect(res.events.some((e) => e.kind === "retry_scheduled")).toBe(true);
+    },
+    30_000
+  );
+
+  test(
     "skip session_completed with clean exit triggers abandoned path",
     async () => {
       const res = await runE2e({ mockSkipComplete: true, timeoutSec: 15 });

@@ -150,7 +150,7 @@ describe("Dashboard view toggle", () => {
     expect(screen.getByText("IN PROGRESS")).toBeInTheDocument();
     // All empty columns show "— rest —"
     const empties = screen.getAllByText("— rest —");
-    expect(empties.length).toBe(6);
+    expect(empties.length).toBe(8);
   });
 
   it("hides state chips in board mode", async () => {

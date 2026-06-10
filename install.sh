@@ -58,6 +58,63 @@ check_bun() {
     exit 1
 }
 
+# Read the installed version from share/VERSION (bundle mode).
+# Falls back to package.json for legacy source-mode installs during migration.
+read_installed_version() {
+    local version_file="${INSTALL_DIR}/share/VERSION"
+    local pkg_file="${INSTALL_DIR}/package.json"
+    if [ -f "${version_file}" ]; then
+        cat "${version_file}"
+    elif [ -f "${pkg_file}" ]; then
+        bun -e "console.log(require('./package.json').version)" 2>/dev/null || true
+    fi
+}
+
+# Remove source-mode files left behind by a previous install so a clean
+# bundle extraction can proceed.  User data (.env, WORKFLOW.md, *.db,
+# workspaces/) is never touched here.
+cleanup_source_mode() {
+    if [ -d "${INSTALL_DIR}/src" ] || [ -d "${INSTALL_DIR}/node_modules" ]; then
+        log_info "Detected source-mode install. Cleaning up..."
+        rm -rf \
+            "${INSTALL_DIR}/src" \
+            "${INSTALL_DIR}/node_modules" \
+            "${INSTALL_DIR}/frontend" \
+            "${INSTALL_DIR}/skills" \
+            "${INSTALL_DIR}/templates" \
+            "${INSTALL_DIR}/scripts" \
+            "${INSTALL_DIR}/tests" \
+            "${INSTALL_DIR}/package.json" \
+            "${INSTALL_DIR}/bun.lock" \
+            "${INSTALL_DIR}/bun.lockb" \
+            "${INSTALL_DIR}/tsconfig.json" \
+            "${INSTALL_DIR}/.env.example"
+    fi
+}
+
+# Copy the bundled skill into agent-global skill directories so all
+# agent sessions on this machine can pick it up immediately without
+# needing a per-workspace sync.
+install_skill_globally() {
+    local skill_src="${INSTALL_DIR}/share/skills/nano-symphony"
+    if [ ! -d "${skill_src}" ]; then
+        log_warn "skill source missing at ${skill_src}, skipping global skill install"
+        return
+    fi
+
+    local nano_dest="${HOME}/.nano/skills/nano-symphony"
+    mkdir -p "${nano_dest}"
+    cp -R "${skill_src}/." "${nano_dest}/"
+    log_info "Installed symphony skill to ${nano_dest}"
+
+    if [ -d "${HOME}/.claude" ]; then
+        local claude_dest="${HOME}/.claude/skills/nano-symphony"
+        mkdir -p "${claude_dest}"
+        cp -R "${skill_src}/." "${claude_dest}/"
+        log_info "Installed symphony skill to ${claude_dest}"
+    fi
+}
+
 # Download and install
 install_symphony() {
     local version="${VERSION:-latest}"
@@ -70,12 +127,12 @@ install_symphony() {
             v*) ;;
             *) tag_version="v${tag_version}" ;;
         esac
-        archive_url="${OSS_BASE_URL}/releases/${tag_version}/nano-symphony-${tag_version}.tar.gz"
+        archive_url="${OSS_BASE_URL}/releases/${tag_version}/nano-symphony-${tag_version#v}.tar.gz"
     fi
 
     # Check current version if already installed
-    if [ -f "${INSTALL_DIR}/package.json" ]; then
-        current_version=$(cd "${INSTALL_DIR}" && bun -e "console.log(require('./package.json').version)" 2>/dev/null || true)
+    if [ -f "${INSTALL_DIR}/share/VERSION" ] || [ -f "${INSTALL_DIR}/package.json" ]; then
+        current_version=$(cd "${INSTALL_DIR}" && read_installed_version 2>/dev/null || true)
         current_version_normalized=$(normalize_version "${current_version}")
 
         # If a specific version is requested and we're already at that version, skip
@@ -151,36 +208,42 @@ install_symphony() {
         log_warn "Failed to download checksum, skipping verification"
     fi
 
-    # Create install directory
+    # Create install directory and remove any source-mode files
     mkdir -p "${INSTALL_DIR}"
+    cleanup_source_mode
 
     # Extract archive; exclude user-config files so they survive updates.
     # Fresh-install initialization happens in the guards below.
     log_info "Extracting archive to ${INSTALL_DIR}..."
-    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}" --exclude='WORKFLOW.md' --exclude='.env' --exclude='*.db' --exclude='workspaces'
-
-    # Install dependencies
-    log_info "Installing dependencies with bun..."
-    (
-        cd "${INSTALL_DIR}"
-        bun install
-    )
+    tar -xzf "${tmp_dir}/nano-symphony.tar.gz" -C "${INSTALL_DIR}" \
+        --exclude='WORKFLOW.md' --exclude='.env' --exclude='*.db' --exclude='workspaces'
 
     # Initialize configuration files if they don't exist
     if [ ! -f "${INSTALL_DIR}/.env" ]; then
         log_info "Creating default .env configuration..."
-        cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
-        # W1: Generate a stable random API_TOKEN so the CLI wrapper can authenticate
+        # Generate a stable random API_TOKEN so the CLI wrapper can authenticate
         # and the server uses the same token across restarts instead of a new random
         # UUID each time.
         api_token="$(bun -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex'))")"
-        tmp_env="${INSTALL_DIR}/.env.tmp"
-        while IFS= read -r line || [ -n "$line" ]; do
-          case "$line" in
-            "API_TOKEN=") printf 'API_TOKEN=%s\n' "${api_token}" ;;
-            *) printf '%s\n' "$line" ;;
-          esac
-        done < "${INSTALL_DIR}/.env" > "$tmp_env" && mv "$tmp_env" "${INSTALL_DIR}/.env"
+        cat > "${INSTALL_DIR}/.env" << ENVEOF
+PORT=4123
+# Bind address — default is loopback only. Change to 0.0.0.0 to expose externally,
+# but API_TOKEN MUST be set when HOST is non-loopback (symphony refuses to start otherwise).
+HOST=127.0.0.1
+# API_TOKEN — shared secret for dashboard and /api/v1/* endpoints.
+# Always enforced. A random UUID is auto-generated if left unset,
+# meaning the token changes on every restart. Set a stable value
+# for local development to avoid stale dashboard tabs.
+API_TOKEN=${api_token}
+DB_PATH=./symphony.db
+WORKFLOW_PATH=./WORKFLOW.md
+NANO_BIN=claude
+WORKSPACE_ROOT=./workspaces
+LOG_LEVEL=info
+MAX_CONCURRENT_AGENTS=3
+MCP_TOKEN_TTL_MS=3600000
+ORCHESTRATOR_TICK_MS=5000
+ENVEOF
         log_info "Generated API_TOKEN — run 'symphony token' to view it."
     else
         log_warn ".env already exists, skipping initialization"
@@ -188,10 +251,13 @@ install_symphony() {
 
     if [ ! -f "${INSTALL_DIR}/WORKFLOW.md" ]; then
         log_info "Creating default WORKFLOW.md..."
-        cp "${INSTALL_DIR}/templates/WORKFLOW.example.md" "${INSTALL_DIR}/WORKFLOW.md"
+        cp "${INSTALL_DIR}/share/templates/WORKFLOW.example.md" "${INSTALL_DIR}/WORKFLOW.md"
     else
         log_warn "WORKFLOW.md already exists, skipping initialization"
     fi
+
+    # Install skill to agent-global directories
+    install_skill_globally
 
     # Create wrapper script
     log_info "Creating ${BINARY_NAME} wrapper in ${BIN_DIR}..."
@@ -252,19 +318,19 @@ USAGE
 
 COMMANDS
   start              Start backend service (foreground). Exit 0 on clean shutdown.
-  dev                Start backend with file-watch (bun --watch).
-  build              Build the frontend (cd frontend && bun run build).
-  test               Run bun test. Exit 0 if all pass, 1 otherwise.
-  lint               Run tsc --noEmit. Exit 0 if clean.
   status             Probe http://localhost:\${PORT}/api/v1/health. Exit 0 if up, 1 if down.
   token              Print the current API token (from .env or environment).
   update [version]   Read OSS metadata and update nano-symphony (default: latest).
-  version            Print version (from \${INSTALL_DIR}/package.json).
+  version            Print version (from \${INSTALL_DIR}/share/VERSION).
   issue list [state] List issues (HTTP GET /api/v1/issues).
   issue get <id>     Get issue (HTTP GET /api/v1/issues/:id).
   issue create <title> [--priority=...] [--state=...]
                      Create issue via HTTP POST /api/v1/issues. Default state: todo.
   help, --help, -h   Print this message.
+
+NOTE
+  dev, build, test, lint subcommands are only available in source builds.
+  For local development, use: SYMPHONY_SHARE_ROOT=\$(pwd) bun --watch src/index.ts
 
 EXAMPLES
   symphony start
@@ -280,7 +346,7 @@ PATHS
   Workflow    : \${INSTALL_DIR}/WORKFLOW.md
   Database    : \${INSTALL_DIR}/symphony.db   (SQLite, persistent)
   Workspaces  : \${INSTALL_DIR}/workspaces
-  Logs        : \${INSTALL_DIR}/workspaces/<identifier>/logs/attempt-<n>.log
+  Logs        : \${INSTALL_DIR}/workspaces/<uuid>/logs/attempt-<n>.log
 
 ENDPOINTS  (defaults; override via PORT or SYMPHONY_PORT)
   HTTP API   : http://localhost:\${PORT}/api/v1
@@ -289,9 +355,9 @@ ENDPOINTS  (defaults; override via PORT or SYMPHONY_PORT)
 
 KEY REST PATHS
   GET    /api/v1/issues[?state=...]
-  GET    /api/v1/issues/:id
-  POST   /api/v1/issues       {identifier,title,state,...}
-  PUT    /api/v1/issues/:id
+  GET    /api/v1/issues/:uuid
+  POST   /api/v1/issues       {title,state,...}
+  PUT    /api/v1/issues/:uuid
   GET    /api/v1/runs
   GET    /api/v1/events[?since=ts]
   GET    /api/v1/events/stream  (SSE)
@@ -306,8 +372,6 @@ MCP TOOLS  (callable via JSON-RPC at /mcp with X-Symphony-Token header)
   symphony.request_workflow_section
   symphony.suggest_state_transition
   symphony.session_completed
-  symphony.create_issue            (NEW)
-  symphony.activate_issue          (NEW)
 
 ENVIRONMENT VARIABLES
   PORT                  4123       HTTP port
@@ -333,17 +397,7 @@ HLP
 }
 
 next_identifier() {
-  curl_api -fsS "\${API_BASE}/issues" | bun -e '
-const chunks = [];
-for await (const chunk of Bun.stdin.stream()) chunks.push(chunk);
-const issues = JSON.parse(Buffer.concat(chunks).toString() || "[]");
-let max = 0;
-for (const issue of issues) {
-  const match = String(issue.identifier ?? "").match(/^TASK-(\\d+)$/);
-  if (match) max = Math.max(max, Number(match[1]));
-}
-console.log("TASK-" + (max + 1));
-'
+  echo "REMOVED - identifier is now auto-generated by the server as TASK-N"
 }
 
 json_string() {
@@ -355,11 +409,13 @@ issue_usage() {
 }
 
 case "\${1:-}" in
-  start)   exec bun run start ;;
-  dev)     exec bun run dev ;;
-  build)   exec bun run build ;;
-  test)    exec bun test ;;
-  lint)    exec bun run lint ;;
+  start)
+    export SYMPHONY_SHARE_ROOT="\${INSTALL_DIR}/share"
+    exec bun "\${INSTALL_DIR}/index.js" ;;
+  dev|build|test|lint)
+    echo "Subcommand '\${1}' is only available in source builds." >&2
+    echo "For local development, use: SYMPHONY_SHARE_ROOT=\$(pwd) bun --watch src/index.ts" >&2
+    exit 64 ;;
   status)
     # W2: Probe /health (auth-exempt) instead of /runs so status works without a token
     # and also provides a reliable liveness signal even before any issues exist.
@@ -378,7 +434,7 @@ case "\${1:-}" in
     fi ;;
   update)
     requested_version="\${2:-}"
-    current_version="\$(bun -e "console.log(require('\${INSTALL_DIR}/package.json').version)" 2>/dev/null || true)"
+    current_version="\$(cat "\${INSTALL_DIR}/share/VERSION" 2>/dev/null || true)"
     current_version_normalized="\$(normalize_version "\${current_version}")"
 
     # If a specific version is requested and we're already at that version, skip
@@ -419,7 +475,7 @@ case "\${1:-}" in
     [ "\${rc}" -eq 0 ] && echo "nano-symphony updated to \${requested_version:-\${latest_version}}. Restart any running symphony service to use the new version."
     exit "\${rc}" ;;
   version|--version|-v)
-    bun -e "console.log(require('\${INSTALL_DIR}/package.json').version)" ;;
+    cat "\${INSTALL_DIR}/share/VERSION" ;;
   issue)
     shift
     sub="\${1:-}"; shift || true
@@ -449,15 +505,12 @@ case "\${1:-}" in
           esac
           shift
         done
-        identifier="\$(next_identifier)" || exit 1
-        [ "\${identifier}" ] || { echo "Failed to generate issue identifier"; exit 1; }
         title_json="\$(json_string "\${title}")"
         priority_json="\$(json_string "\${priority}")"
         state_json="\$(json_string "\${state}")"
-        identifier_json="\$(json_string "\${identifier}")"
         curl_api -fsS -X POST "\${API_BASE}/issues" \
           -H 'Content-Type: application/json' \
-          -d "{\"identifier\":\${identifier_json},\"title\":\${title_json},\"priority\":\${priority_json},\"state\":\${state_json},\"labels\":[]}" ;;
+          -d "{\"title\":\${title_json},\"priority\":\${priority_json},\"state\":\${state_json},\"labels\":[]}" ;;
       *) issue_usage; exit 64 ;;
     esac ;;
   help|--help|-h|"") print_help ;;
@@ -514,3 +567,4 @@ main() {
 }
 
 main "$@"
+

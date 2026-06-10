@@ -9,3 +9,5 @@ frontend/dist/
 *.log
 run_log.jsonl
 .nano/
+.symphony/
+WORKFLOW.md

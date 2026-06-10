@@ -6,7 +6,7 @@ export type { EventKind } from "./event-kinds.ts";
 
 export function createEventOps(db: Database) {
   const recordEventStmt = db.prepare(`
-    INSERT INTO symphony_events (id, issue_id, ts, kind, message, payload_json)
+    INSERT INTO symphony_events (id, issue_uuid, ts, kind, message, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
@@ -20,7 +20,7 @@ export function createEventOps(db: Database) {
 
   const getLatestEventByKindStmt = db.prepare(`
     SELECT * FROM symphony_events
-    WHERE issue_id = ? AND kind = ?
+    WHERE issue_uuid = ? AND kind = ?
     -- Multiple events can share a millisecond timestamp; rowid keeps "latest" deterministic.
     ORDER BY ts DESC, rowid DESC
     LIMIT 1
@@ -28,7 +28,7 @@ export function createEventOps(db: Database) {
 
   const getEventsByKindStmt = db.prepare(`
     SELECT * FROM symphony_events
-    WHERE issue_id = ? AND kind = ?
+    WHERE issue_uuid = ? AND kind = ?
     ORDER BY ts ASC, rowid ASC
   `);
 
@@ -41,13 +41,13 @@ export function createEventOps(db: Database) {
    *   `payload.content`, `payload.reason` (in priority order)
    * - If none of these fields are present, the entire payload is shown as JSON
    */
-  function recordEvent(issueId: string, kind: string, message: string, payload?: unknown): void {
+  function recordEvent(issueUuid: string, kind: string, message: string, payload?: unknown): void {
     const id = nanoid();
     const ts = Date.now();
     const payloadJson = payload !== undefined ? JSON.stringify(payload) : null;
-    recordEventStmt.run(id, issueId, ts, kind, message, payloadJson);
+    recordEventStmt.run(id, issueUuid, ts, kind, message, payloadJson);
     // Emit event on bus after DB write succeeds
-    bus.emit("event", { id, issue_id: issueId, ts, kind, message, payload_json: payloadJson });
+    bus.emit("event", { id, issue_uuid: issueUuid, ts, kind, message, payload_json: payloadJson });
   }
 
   function getEvents(since?: number): SymphonyEvent[] {
@@ -57,12 +57,12 @@ export function createEventOps(db: Database) {
     return getAllEventsStmt.all() as SymphonyEvent[];
   }
 
-  function getLatestEventByKind(issueId: string, kind: string): SymphonyEvent | null {
-    return (getLatestEventByKindStmt.get(issueId, kind) as SymphonyEvent | null) ?? null;
+  function getLatestEventByKind(issueUuid: string, kind: string): SymphonyEvent | null {
+    return (getLatestEventByKindStmt.get(issueUuid, kind) as SymphonyEvent | null) ?? null;
   }
 
-  function getEventsByKind(issueId: string, kind: string): SymphonyEvent[] {
-    return getEventsByKindStmt.all(issueId, kind) as SymphonyEvent[];
+  function getEventsByKind(issueUuid: string, kind: string): SymphonyEvent[] {
+    return getEventsByKindStmt.all(issueUuid, kind) as SymphonyEvent[];
   }
 
   return {

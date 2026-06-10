@@ -14,13 +14,13 @@ describe("tracker comments", () => {
 
   beforeEach(() => {
     tracker = mkTracker();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "Test issue", state: "todo" });
+    tracker.insertIssue({ uuid: "i1", title: "Test issue", state: "todo" });
   });
 
   test("addComment creates a comment with default author", () => {
     const comment = tracker.addComment("i1", { body: "Hello world" });
     expect(comment.id).toBeTruthy();
-    expect(comment.issue_id).toBe("i1");
+    expect(comment.issue_uuid).toBe("i1");
     expect(comment.author).toBe("operator");
     expect(comment.body).toBe("Hello world");
     expect(comment.ts).toBeGreaterThan(0);
@@ -115,7 +115,7 @@ describe("tracker comments", () => {
   });
 
   test("comments are scoped to issue", () => {
-    tracker.insertIssue({ id: "i2", identifier: "TEST-2", title: "Other", state: "todo" });
+    tracker.insertIssue({ uuid: "i2", title: "Other", state: "todo" });
     tracker.addComment("i1", { body: "for i1" });
     tracker.addComment("i2", { body: "for i2" });
 

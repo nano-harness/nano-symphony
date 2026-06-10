@@ -382,6 +382,9 @@ curl -s -H "X-Symphony-Token: ${TOKEN}" http://localhost:4123/api/v1/issues/<ISS
 | MCP callback returns 401/403 | Token not passed or expired | Check `.nano.yaml` has `X-Symphony-Token` header and `MCP_TOKEN_TTL_MS` |
 | Token usage always null (claude-code) | Older symphony version not extracting envelope.usage | Update to v0.8+; check `parseResult` extracts from envelope |
 | SSE stream returns 503 | Too many simultaneous SSE connections (max 50) | Close unused browser tabs / SSE clients |
+| Plan run stuck in `awaiting_approval` | Waiting for human to approve dry_run_summary | Call `POST /api/v1/plan-runs/<id>/approve` — or reject with `POST /api/v1/plan-runs/<id>/reject {"reason":"..."}` |
+| Plan run script fails / dry_run fails | Script error, timeout, or exceeded max_issues | Check `${SYMPHONY_DATA}/plan-runs/<id>/journal.jsonl` for entries with `type="error"`; also review service stderr |
+| Caller issue stuck in `awaiting_plan` indefinitely | Plan run reached terminal state but `tickFinalizedPlans` hasn't resumed caller yet | Wait one orchestrator tick (default 5s); if still stuck check `symphony_events` for `caller_resumed` event on caller issue |
 
 ## Common Mistakes
 

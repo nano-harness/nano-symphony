@@ -21,7 +21,7 @@ describe("worker resolves agent from issue overrides first", () => {
   test("issue.agent_kind overrides workflow.agent.kind", async () => {
     const { tracker } = mkTracker();
     tracker.insertIssue({
-      id: "ag-1", identifier: "AG-1", title: "t", state: "todo",
+      uuid: "ag-1", title: "t", state: "todo",
       agent_kind: "claude-code",
     });
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-ag-"));
@@ -51,13 +51,15 @@ describe("worker resolves agent from issue overrides first", () => {
     });
 
     expect(observed.agentKind).toBe("claude-code");
-    // binary = agentConfig?.binary ?? kind_default. Workflow sets binary: "nano", so it wins.
-    expect(observed.binary).toBe("nano");
+    // When agentKind is overridden by issue.agent_kind, binary must follow the
+    // overridden kind's default to avoid running e.g. 'nano' binary with
+    // claude-code adapter arguments.
+    expect(observed.binary).toBe("claude");
   });
 
   test("missing override falls back to workflow defaults", async () => {
     const { tracker } = mkTracker();
-    tracker.insertIssue({ id: "ag-2", identifier: "AG-2", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "ag-2", title: "t", state: "todo" });
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-ag-"));
 
     let observed: { agentKind?: string; binary?: string } = {};
@@ -88,10 +90,42 @@ describe("worker resolves agent from issue overrides first", () => {
     expect(observed.binary).toBe("claude");
   });
 
+  test("missing workflow agent config defaults to claude-code", async () => {
+    const { tracker } = mkTracker();
+    tracker.insertIssue({ uuid: "ag-4", title: "t", state: "todo" });
+    const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-ag-"));
+
+    let observed: { agentKind?: string; binary?: string } = {};
+    const spawn = async (opts: any): Promise<SpawnResult> => {
+      observed = { agentKind: opts.agentKind, binary: opts.binary };
+      return {
+        exitCode: 0, killedByTimeout: false, duration_ms: 50,
+        agentResult: { status: "success", goal_state: { last_reason: "done" } },
+        artifacts: {},
+      };
+    };
+
+    await runWorker("ag-4", 0, {
+      tracker,
+      workflow: {
+        workflow: {
+          workspace: { root: wsRoot, git_baseline: false },
+        } as any,
+        template: "x",
+      },
+      logger: silentLogger,
+      mcpUrl: "http://localhost:0/mcp",
+      spawn: spawn as any,
+    });
+
+    expect(observed.agentKind).toBe("claude-code");
+    expect(observed.binary).toBe("claude");
+  });
+
   test("started event payload carries agent_kind + agent_overridden", async () => {
     const { tracker } = mkTracker();
     tracker.insertIssue({
-      id: "ag-3", identifier: "AG-3", title: "t", state: "todo",
+      uuid: "ag-3", title: "t", state: "todo",
       agent_kind: "claude-code",
     });
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-ag-"));
@@ -117,7 +151,7 @@ describe("worker resolves agent from issue overrides first", () => {
     });
 
     const started = tracker.getEvents()
-      .filter((e) => e.issue_id === "ag-3" && e.kind === "started")[0];
+      .filter((e) => e.issue_uuid === "ag-3" && e.kind === "started")[0];
     expect(started).toBeDefined();
     const payload = JSON.parse(started.payload_json!);
     expect(payload.agent_kind).toBe("claude-code");

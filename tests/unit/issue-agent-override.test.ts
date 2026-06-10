@@ -13,7 +13,7 @@ describe("tracker round-trips agent_kind", () => {
   test("insert + getIssue persists agent_kind override", () => {
     const t = mk();
     t.insertIssue({
-      id: "i1", identifier: "I-1", title: "t", state: "todo",
+      uuid: "i1", title: "t", state: "todo",
       agent_kind: "claude-code",
     });
     const got = t.getIssue("i1")!;
@@ -22,7 +22,7 @@ describe("tracker round-trips agent_kind", () => {
 
   test("missing override defaults to null", () => {
     const t = mk();
-    t.insertIssue({ id: "i2", identifier: "I-2", title: "t", state: "todo" });
+    t.insertIssue({ uuid: "i2", title: "t", state: "todo" });
     const got = t.getIssue("i2")!;
     expect(got.agent_kind).toBeNull();
   });
@@ -30,11 +30,11 @@ describe("tracker round-trips agent_kind", () => {
   test("listIssues includes agent_kind field", () => {
     const t = mk();
     t.insertIssue({
-      id: "i3", identifier: "I-3", title: "t", state: "todo",
+      uuid: "i3", title: "t", state: "todo",
       agent_kind: "nano",
     });
     const list = t.listIssues();
-    const i3 = list.find((i) => i.id === "i3")!;
+    const i3 = list.find((i) => i.uuid === "i3")!;;
     expect(i3.agent_kind).toBe("nano");
   });
 });

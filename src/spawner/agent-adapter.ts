@@ -24,11 +24,17 @@ export interface AgentAdapter {
    */
   parseResult(stdout: string): AgentResultSummary | null;
   /**
-   * Read artifacts produced by the agent (e.g. solution.patch in
-   * --output-dir). Async because it touches the filesystem. MUST NOT
-   * throw — return an empty `{}` on any I/O failure.
+   * Read artifacts produced by the agent (e.g. files in --output-dir).
+   * Async because it touches the filesystem. MUST NOT throw — return an
+   * empty `{}` on any I/O failure.
    */
   collectArtifacts(ctx: SpawnContext): Promise<AgentArtifacts>;
+
+  /**
+   * Optional: one-time async preparation before the first spawn (e.g. check
+   * binary availability, warm caches). Called at most once per process.
+   */
+  prepare?(): Promise<void>;
 
   /**
    * Optional: Parse a single streaming line from stdout during execution.

@@ -39,19 +39,19 @@ describe("worker in-process result delivery", () => {
     const db = new Database(":memory:");
     runMigrations(db);
     const tracker = createTracker(db);
-    tracker.insertIssue({ id: "i3", identifier: "LOCK-3", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i3", title: "t", state: "todo" });
 
     const binary = await makeSilentBinary();
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-workspaces-"));
 
     await runWorker("i3", 0, {
       tracker,
-      workflow: { workflow: { agent: { binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
+      workflow: { workflow: { agent: { kind: "nano", binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
       logger: silentLogger,
       mcpUrl: "http://localhost:0/mcp",
     });
 
-    const ev = tracker.getEvents().find((e) => e.issue_id === "i3" && e.kind === "no_result_payload");
+    const ev = tracker.getEvents().find((e) => e.issue_uuid === "i3" && e.kind === "no_result_payload");
     expect(ev).toBeDefined();
   });
 
@@ -59,7 +59,7 @@ describe("worker in-process result delivery", () => {
     const db = new Database(":memory:");
     runMigrations(db);
     const tracker = createTracker(db);
-    tracker.insertIssue({ id: "i5", identifier: "LOCK-5", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i5", title: "t", state: "todo" });
 
     const output = JSON.stringify({ status: "success", reason: "all done" });
     const binary = await makeFakeBinaryWithOutput(output);
@@ -67,12 +67,12 @@ describe("worker in-process result delivery", () => {
 
     await runWorker("i5", 0, {
       tracker,
-      workflow: { workflow: { agent: { binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
+      workflow: { workflow: { agent: { kind: "nano", binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
       logger: silentLogger,
       mcpUrl: "http://localhost:0/mcp",
     });
 
-    const ev = tracker.getEvents().find((e) => e.issue_id === "i5" && e.kind === "completed");
+    const ev = tracker.getEvents().find((e) => e.issue_uuid === "i5" && e.kind === "completed");
     expect(ev).toBeDefined();
   });
 
@@ -80,7 +80,7 @@ describe("worker in-process result delivery", () => {
     const db = new Database(":memory:");
     runMigrations(db);
     const tracker = createTracker(db);
-    tracker.insertIssue({ id: "i6", identifier: "LOCK-6", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "i6", title: "t", state: "todo" });
 
     const output = JSON.stringify({ status: "needs_retry", reason: "temp failure" });
     const binary = await makeFakeBinaryWithOutput(output);
@@ -88,13 +88,13 @@ describe("worker in-process result delivery", () => {
 
     await runWorker("i6", 0, {
       tracker,
-      workflow: { workflow: { agent: { binary, timeout_ms: 5000, max_retries: 3 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
+      workflow: { workflow: { agent: { kind: "nano", binary, timeout_ms: 5000, max_retries: 3 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
       logger: silentLogger,
       mcpUrl: "http://localhost:0/mcp",
     });
 
     const retries = tracker.fetchDueRetries(Date.now() + 600_000);
     expect(retries.length).toBe(1);
-    expect(retries[0].issue_id).toBe("i6");
+    expect(retries[0].issue_uuid).toBe("i6");
   });
 });

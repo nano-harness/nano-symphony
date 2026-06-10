@@ -31,7 +31,7 @@ async function makeFakeBinaryWithOutput(output: string): Promise<string> {
 describe("worker auto-records token stats from agent result payload", () => {
   test("populates symphony_runs token columns when payload.tokens present", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "tok-1", identifier: "TOK-1", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "tok-1", title: "t", state: "todo" });
     const output = JSON.stringify({
       status: "success",
       tokens: { input: 12345, output: 678 },
@@ -42,7 +42,7 @@ describe("worker auto-records token stats from agent result payload", () => {
 
     await runWorker("tok-1", 0, {
       tracker,
-      workflow: { workflow: { agent: { binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
+      workflow: { workflow: { agent: { kind: "nano", binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
       logger: silentLogger,
       mcpUrl: "http://localhost:0/mcp",
     });
@@ -55,14 +55,14 @@ describe("worker auto-records token stats from agent result payload", () => {
 
   test("leaves token columns at 0 when payload has no tokens field", async () => {
     const tracker = mkTracker();
-    tracker.insertIssue({ id: "tok-2", identifier: "TOK-2", title: "t", state: "todo" });
+    tracker.insertIssue({ uuid: "tok-2", title: "t", state: "todo" });
     const output = JSON.stringify({ status: "success" });
     const binary = await makeFakeBinaryWithOutput(output);
     const wsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nano-symphony-workspaces-"));
 
     await runWorker("tok-2", 0, {
       tracker,
-      workflow: { workflow: { agent: { binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
+      workflow: { workflow: { agent: { kind: "nano", binary, timeout_ms: 5000 }, workspace: { root: wsRoot, git_baseline: false } } as any, template: "x" },
       logger: silentLogger,
       mcpUrl: "http://localhost:0/mcp",
     });

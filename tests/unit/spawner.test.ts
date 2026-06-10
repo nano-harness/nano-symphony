@@ -26,7 +26,7 @@ describe("spawnAgent (nano adapter)", () => {
         "#!/bin/sh",
         "printf '%s\\n' \"$@\" > args.txt",
         "cat > stdin.txt",
-        "printf '%s' \"$SYMPHONY_TOKEN\" > token-env.txt",
+        "printf '%s' \"$SYMPHONY_ISSUE_UUID\" > issue-uuid-env.txt",
         `printf '%s\\n' '{"status":"success","reason":"done"}'`,
       ].join("\n"),
       "utf-8"
@@ -34,7 +34,7 @@ describe("spawnAgent (nano adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-1",
+      issueUuid: "issue-1",
       attempt: 2,
       workspace,
       prompt: "prompt from stdin",
@@ -42,22 +42,27 @@ describe("spawnAgent (nano adapter)", () => {
       mcpUrl: "http://localhost:4123/mcp",
       binary,
       timeoutMs: 5_000,
+      agentKind: "nano",
     });
 
     expect(result.exitCode).toBe(0);
     expect(result.killedByTimeout).toBe(false);
     expect(result.agentResult).toEqual({ status: "success", reason: "done" });
     expect(await fs.readFile(path.join(workspace, "stdin.txt"), "utf-8")).toBe("prompt from stdin");
-    expect(await fs.readFile(path.join(workspace, "token-env.txt"), "utf-8")).toBe("secret-token");
+    expect(await fs.readFile(path.join(workspace, "issue-uuid-env.txt"), "utf-8")).toBe("issue-1");
 
     const args = await fs.readFile(path.join(workspace, "args.txt"), "utf-8");
     expect(args).toContain("--permission-mode");
     expect(args).toContain("auto");
+    expect(args).toContain("--allowedTools");
+    expect(args).toContain("mcp_symphony_*");
 
-    // No .nano/nano.yaml written
-    let nanoYamlExists = true;
-    try { await fs.stat(path.join(workspace, ".nano/nano.yaml")); } catch { nanoYamlExists = false; }
-    expect(nanoYamlExists).toBe(false);
+    // .mcp.json must be written with Claude Code compatible MCP config
+    const mcpJson = await fs.readFile(path.join(workspace, ".mcp.json"), "utf-8");
+    const parsed = JSON.parse(mcpJson);
+    expect(parsed.mcpServers.symphony.type).toBe("http");
+    expect(parsed.mcpServers.symphony.url).toBe("http://localhost:4123/mcp");
+    expect(parsed.mcpServers.symphony.headers["X-Symphony-Token"]).toBe("secret-token");
   });
 
   test("returns null agentResult when stdout is empty", async () => {
@@ -67,7 +72,7 @@ describe("spawnAgent (nano adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-empty",
+      issueUuid: "issue-empty",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -75,15 +80,17 @@ describe("spawnAgent (nano adapter)", () => {
       mcpUrl: "http://localhost:4123/mcp",
       binary,
       timeoutMs: 5_000,
+      agentKind: "nano",
     });
 
     expect(result.agentResult).toBeNull();
   });
 
-  test("collects patch artifact from output dir", async () => {
+  test("returns empty artifacts for nano adapter (patch no longer produced by agent)", async () => {
     const workspace = await makeTempDir();
     const outputDir = path.join(workspace, ".nano-out");
     await fs.mkdir(outputDir, { recursive: true });
+    // Even if a legacy solution.patch exists, nano adapter should ignore it
     await fs.writeFile(path.join(outputDir, "solution.patch"), "diff --git a/foo b/foo\n", "utf-8");
 
     const binary = path.join(workspace, "fake-nano.sh");
@@ -99,7 +106,7 @@ describe("spawnAgent (nano adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-patch",
+      issueUuid: "issue-patch",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -107,9 +114,10 @@ describe("spawnAgent (nano adapter)", () => {
       mcpUrl: "http://localhost:4123/mcp",
       binary,
       timeoutMs: 5_000,
+      agentKind: "nano",
     });
 
-    expect(result.artifacts.patch).toBe("diff --git a/foo b/foo\n");
+    expect(result.artifacts).toEqual({});
   });
 
 });
@@ -130,7 +138,7 @@ describe("spawnAgent (claude-code adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-claude",
+      issueUuid: "issue-claude",
       attempt: 0,
       workspace,
       prompt: "do the thing",
@@ -169,7 +177,7 @@ describe("spawnAgent (claude-code adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-claude-err",
+      issueUuid: "issue-claude-err",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -199,7 +207,7 @@ describe("spawnAgent (claude-code adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-claude-err2",
+      issueUuid: "issue-claude-err2",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -229,7 +237,7 @@ describe("spawnAgent (claude-code adapter)", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-claude-art",
+      issueUuid: "issue-claude-art",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -266,7 +274,7 @@ describe("spawnAgent (claude-code adapter)", () => {
 
     try {
       await spawnAgent({
-        issueId: "issue-env-s3",
+        issueUuid: "issue-env-s3",
         attempt: 0,
         workspace,
         prompt: "test",
@@ -274,6 +282,7 @@ describe("spawnAgent (claude-code adapter)", () => {
         mcpUrl: "http://localhost:4123/mcp",
         binary,
         timeoutMs: 5_000,
+        agentKind: "nano",
       });
     } finally {
       if (origApiToken === undefined) delete process.env.API_TOKEN; else process.env.API_TOKEN = origApiToken;
@@ -311,7 +320,7 @@ describe("spawnAgent A1 — stdout tail ring buffer", () => {
     await fs.chmod(binary, 0o755);
 
     const result = await spawnAgent({
-      issueId: "issue-a1",
+      issueUuid: "issue-a1",
       attempt: 0,
       workspace,
       prompt: "test",
@@ -319,6 +328,7 @@ describe("spawnAgent A1 — stdout tail ring buffer", () => {
       mcpUrl: "http://localhost:4123/mcp",
       binary,
       timeoutMs: 15_000,
+      agentKind: "nano",
     });
 
     expect(result.exitCode).toBe(0);

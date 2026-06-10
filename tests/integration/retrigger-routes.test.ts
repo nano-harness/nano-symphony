@@ -20,7 +20,7 @@ function makeApp() {
 describe("retrigger routes", () => {
   test("POST /issues/:id/retrigger from done state → todo", async () => {
     const { app, tracker, getTickCount } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
     // Create a run row to simulate a previously-completed run
     tracker.claimIssue("i1", 1);
     tracker.releaseIssue("i1", "released");
@@ -50,7 +50,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger from cancelled state → todo", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "cancelled" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "cancelled" });
 
     const res = await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -65,7 +65,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger from in_review state → todo", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "in_review" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "in_review" });
 
     const res = await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -80,7 +80,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger clears blocker fingerprint by default", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
     tracker.updateLastBlockerFingerprint("i1", "some_fingerprint");
 
     await app.request("/issues/i1/retrigger", {
@@ -94,7 +94,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger with reset_blocker_fingerprint=false preserves fingerprint", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
     tracker.updateLastBlockerFingerprint("i1", "keep_me");
 
     await app.request("/issues/i1/retrigger", {
@@ -108,7 +108,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger with note creates a comment", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
 
     await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -124,7 +124,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger releases non-released run", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
     // Simulate a claimed run
     tracker.claimIssue("i1", 1);
     tracker.releaseIssue("i1", "cancelled");
@@ -142,7 +142,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger with invalid target_state returns 400", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
 
     const res = await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -155,7 +155,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger with target_state=done returns 400", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "in_review" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "in_review" });
 
     const res = await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -180,7 +180,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger records retrigger_requested event", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "in_review" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "in_review" });
 
     await app.request("/issues/i1/retrigger", {
       method: "POST",
@@ -188,7 +188,7 @@ describe("retrigger routes", () => {
       body: JSON.stringify({}),
     });
 
-    const events = tracker.getEvents().filter((e) => e.issue_id === "i1" && e.kind === "retrigger_requested");
+    const events = tracker.getEvents().filter((e) => e.issue_uuid === "i1" && e.kind === "retrigger_requested");
     expect(events.length).toBe(1);
     const payload = JSON.parse(events[0].payload_json!);
     expect(payload.from_state).toBe("in_review");
@@ -198,7 +198,7 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger is idempotent (repeated calls don't 5xx)", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
 
     // Call retrigger 3 times
     for (let i = 0; i < 3; i++) {
@@ -217,14 +217,14 @@ describe("retrigger routes", () => {
 
   test("POST /issues/:id/retrigger makes issue pickable by candidates query", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "i1", identifier: "TEST-1", title: "t", state: "done" });
+    tracker.insertIssue({ uuid: "i1", title: "t", state: "done" });
     // Simulate a completed run with synced last_issue_state
     tracker.claimIssue("i1", 1);
     tracker.releaseIssue("i1", "released");
     tracker.updateLastIssueState("i1", "done");
 
     // Issue should NOT be a candidate (it's in done state with synced last_issue_state)
-    expect(tracker.getCandidates(10).find((c) => c.id === "i1")).toBeUndefined();
+    expect(tracker.getCandidates(10).find((c) => c.uuid === "i1")).toBeUndefined();
 
     // Now retrigger
     await app.request("/issues/i1/retrigger", {
@@ -235,6 +235,6 @@ describe("retrigger routes", () => {
 
     // Issue should now be a candidate
     const candidates = tracker.getCandidates(10);
-    expect(candidates.find((c) => c.id === "i1")).toBeDefined();
+    expect(candidates.find((c) => c.uuid === "i1")).toBeDefined();
   });
 });

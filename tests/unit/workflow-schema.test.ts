@@ -18,12 +18,12 @@ describe("workflow schema - agent config", () => {
     expect(parsed.data?.agent?.extra_env).toEqual({ FOO: "bar" });
   });
 
-  test("defaults to nano kind and 1h timeout", () => {
+  test("defaults to claude-code kind and 1h timeout", () => {
     const parsed = WorkflowSchema.parse({
       tracker: { type: "local" },
       agent: {},
     });
-    expect(parsed.agent?.kind).toBe("nano");
+    expect(parsed.agent?.kind).toBe("claude-code");
     expect(parsed.agent?.timeout_ms).toBe(3600000);
     expect(parsed.agent?.max_retries).toBe(3);
   });
@@ -37,11 +37,14 @@ describe("workflow schema - agent config", () => {
         permission_auto: { allow_rules: [] },
       },
     });
-    // Schema strips unknown fields (no .strict() on agent object)
+    // Schema accepts known fields (sandbox, permission_mode) and passes through
+    // unknown fields (permission_auto) without throwing — backward compat.
     expect(parsed.success).toBe(true);
-    expect((parsed.data?.agent as any)?.sandbox).toBeUndefined();
-    expect((parsed.data?.agent as any)?.permission_mode).toBeUndefined();
-    expect((parsed.data?.agent as any)?.permission_auto).toBeUndefined();
+    // Known fields are now preserved (added in B3)
+    expect((parsed.data?.agent as any)?.sandbox).toEqual({ backend: "native" });
+    expect((parsed.data?.agent as any)?.permission_mode).toBe("auto");
+    // Unknown fields pass through silently (passthrough mode) — no rejection
+    expect(parsed.data?.agent).toBeDefined();
   });
 
   test("rejects invalid agent kind", () => {

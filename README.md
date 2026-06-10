@@ -38,7 +38,7 @@ nano-symphony is a lightweight orchestration service for running coding-agent wo
 ## Requirements
 
 - [Bun](https://bun.sh/) for dependency installation, running the backend, tests, and frontend build.
-- A compatible coding-agent executable available on `PATH` or configured through `NANO_BIN` / workflow settings. The default binary name is `nano`.
+- A compatible coding-agent executable available on `PATH` or configured through `NANO_BIN` / workflow settings. Unspecified workflows default to `claude-code` with the `claude` binary; set `agent.kind: nano` to use nano explicitly.
 
 ## Download
 
@@ -50,7 +50,7 @@ Requires [Bun](https://bun.sh/) to be installed first.
 curl -sSL https://binary-releases.oss-cn-hangzhou.aliyuncs.com/symphony/install.sh | bash
 ```
 
-This will download the latest release, install dependencies, and create the `symphony` launcher in `~/.local/bin`.
+This will download the latest pre-built bundle (~5 MB), extract it to `~/.local/share/nano-symphony/`, and create the `symphony` launcher in `~/.local/bin`. No `npm install` or source compilation is needed.
 
 After installation, start the service with:
 
@@ -66,6 +66,8 @@ symphony update
 
 The update command reads the OSS release metadata, downloads the published installer from that metadata, and reruns it with the existing install and binary directories. Existing `.env`, `WORKFLOW.md`, database, and workspaces are preserved; restart any running service after updating.
 
+> **Note:** `symphony dev`, `symphony build`, `symphony test`, and `symphony lint` are only available in source builds and will print a clear error in bundle installs. For local source development use: `SYMPHONY_SHARE_ROOT=$(pwd) bun --watch src/index.ts`.
+
 ### Manual Download
 
 Pre-built release archives and the skill file are hosted on OSS.
@@ -80,7 +82,25 @@ Pre-built release archives and the skill file are hosted on OSS.
 
 For all versioned releases, see the [GitHub Releases](https://github.com/nano-harness/nano-symphony/releases) page.
 
-## Quick start
+```
+~/.local/share/nano-symphony/
+├── index.js                       # minified bundle (~484 KB)
+├── fsevents*.node                 # chokidar native binding (macOS only)
+├── share/
+│   ├── frontend/dist/             # compiled dashboard
+│   ├── skills/nano-symphony/      # agent skill file (also written to ~/.nano/skills/ globally)
+│   ├── templates/
+│   │   └── WORKFLOW.example.md
+│   └── VERSION                    # semver, e.g. 0.1.5
+├── .env                           # generated on first install
+├── WORKFLOW.md                    # copied from template on first install
+├── symphony.db                    # SQLite, preserved across updates
+└── workspaces/                    # preserved across updates
+
+~/.nano/skills/nano-symphony/SKILL.md        # written by install.sh
+~/.claude/skills/nano-symphony/SKILL.md      # written by install.sh (if ~/.claude/ exists)
+~/.local/bin/symphony                        # wrapper script
+```
 
 > **For a step-by-step local loop walkthrough**, see [skills/nano-symphony-local-loop/SKILL.md](skills/nano-symphony-local-loop/SKILL.md) for the fastest path to running a complete demo.
 
@@ -101,7 +121,7 @@ For all versioned releases, see the [GitHub Releases](https://github.com/nano-ha
    symphony start
    ```
 
-### Manual Setup
+### Manual Setup (source mode)
 
 1. Install dependencies and create a local `.env` file:
 
@@ -128,16 +148,16 @@ For all versioned releases, see the [GitHub Releases](https://github.com/nano-ha
    关于这些字段如何被解析与渲染，参见
    [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
 
-3. Start the backend service:
+3. Start the backend service with the share root pointing to the project directory:
 
    ```bash
-   bun run start
+   SYMPHONY_SHARE_ROOT=$(pwd) bun run start
    ```
 
    For development with file watching:
 
    ```bash
-   bun run dev
+   SYMPHONY_SHARE_ROOT=$(pwd) bun run dev
    ```
 
 4. Open the HTTP API at `http://localhost:4123/api/v1`. The MCP endpoint is available at `http://localhost:4123/mcp`.
@@ -174,7 +194,7 @@ Runtime configuration is read from environment variables and validated at startu
 | `API_TOKEN` | *(auto-generated)* | Shared secret protecting `/api/v1/*`. **Always enforced** — a random UUID is auto-generated if unset, so the API is never open by default. Set an explicit value to keep the token stable across restarts. Provide as `Authorization: ******` or `X-Symphony-Token: <your-token>` header (or `?token=` query param for EventSource). The token is injected into the served dashboard for automatic auth. |
 | `DB_PATH` | `./symphony.db` | SQLite database path. |
 | `WORKFLOW_PATH` | `./WORKFLOW.md` | Workflow Markdown file path. |
-| `NANO_BIN` | `nano` | Default agent binary. |
+| `NANO_BIN` | `claude` | Default fallback agent binary. |
 | `WORKSPACE_ROOT` | `./workspaces` | Root directory for generated workspaces. |
 | `LOG_LEVEL` | `info` | Pino log level. |
 | `MAX_CONCURRENT_AGENTS` | `3` | Maximum concurrent agent runs. |

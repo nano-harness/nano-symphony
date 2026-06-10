@@ -2,6 +2,7 @@
 tracker:
   type: local
 agent:
+  kind: nano
   binary: nano
   timeout_ms: 3600000        # 1 hour; tune down for fast trivial tasks
   max_retries: 3
@@ -12,22 +13,20 @@ agent:
     extra_writable_paths: []  # workspace is already writable; rarely needed
     docker_image: ubuntu:24.04 # only used when backend=docker
     # docker_runtime: runsc    # optional: use gVisor (runsc) or Kata Containers for stronger isolation with docker backend
-  # Permission mode controls how tool calls are gated (requires nano-agent >= 0.x.x)
+  # Permission mode controls how tool calls are gated (requires nano-agent >= 0.8.2)
   # - auto (default): LLM-backed risk classifier auto-approves low-risk tools, blocks high-risk ones
   # - default: tool-by-tool confirmation required for write operations
   # - acceptEdits: auto-approve file edits but require confirmation for other risky tools
   # - yolo: auto-approve everything (legacy behavior, not recommended for production)
   # - plan: block all actions until user confirms execution plan
   permission_mode: auto
-  # Optional: configure auto mode behavior (only used when permission_mode=auto)
-  permission_auto:
-    backend: llm
-    confidence_threshold: 0.8
-    timeout_seconds: 5
-    cache_ttl_minutes: 30
-    allow_rules: ["Bash(vwsd *)", "Bash(sngs *)"]
-    denial_max_consecutive: 0
-    denial_max_total: 0
+  # Optional: fine-tune which tools are allowed or denied (nano-agent >= 0.8.2)
+  # Note: NANO_DAEMON_CONFIRM_POLICY=allow is ineffective on nano-agent <= 0.8.1; use permissions.allow instead.
+  permissions:
+    allow: []                 # extra tool glob patterns to always allow, e.g. ["Bash(vwsd *)", "Bash(sngs *)"]
+    deny: []                  # tool glob patterns to always deny
+    denial_max_consecutive: 0 # 0 = unlimited; max consecutive denials before agent is blocked
+    denial_max_total: 0       # 0 = unlimited; total denial budget across the session
 workspace:
   root: ./workspaces
   # When true (default), symphony auto-runs `git init && git commit --allow-empty`

@@ -7,7 +7,7 @@ import path from "path";
 const INLINE_THRESHOLD = 64 * 1024; // 64KB
 
 export interface CollectContext {
-  issueId: string;
+  issueUuid: string;
   attempt: number;
   workspacePath: string;
   tracker: Tracker;
@@ -31,7 +31,7 @@ async function persistGitDiff(ctx: CollectContext, diff: { base_ref: string; sta
     await fs.writeFile(storagePath, diff.diff_unified, "utf-8");
 
     ctx.tracker.insertArtifact({
-      issue_id: ctx.issueId,
+      issue_uuid: ctx.issueUuid,
       attempt: ctx.attempt,
       source: "git_diff",
       kind: "file_diff",
@@ -43,7 +43,7 @@ async function persistGitDiff(ctx: CollectContext, diff: { base_ref: string; sta
     });
   } else {
     ctx.tracker.insertArtifact({
-      issue_id: ctx.issueId,
+      issue_uuid: ctx.issueUuid,
       attempt: ctx.attempt,
       source: "git_diff",
       kind: "file_diff",
@@ -57,7 +57,7 @@ async function persistGitDiff(ctx: CollectContext, diff: { base_ref: string; sta
 
 async function persistFileArtifact(ctx: CollectContext, filePath: string, kind: string): Promise<boolean> {
   // Dedup: if MCP already persisted this path, skip
-  if (ctx.tracker.artifactExistsByPath(ctx.issueId, ctx.attempt, filePath)) {
+  if (ctx.tracker.artifactExistsByPath(ctx.issueUuid, ctx.attempt, filePath)) {
     return false;
   }
 
@@ -79,7 +79,7 @@ async function persistFileArtifact(ctx: CollectContext, filePath: string, kind: 
   }
 
   ctx.tracker.insertArtifact({
-    issue_id: ctx.issueId,
+    issue_uuid: ctx.issueUuid,
     attempt: ctx.attempt,
     source: "git_diff",
     kind,
@@ -113,10 +113,10 @@ export async function collectAllArtifacts(ctx: CollectContext): Promise<number> 
       if (await persistFileArtifact(ctx, change.path, "file_added")) count++;
     } else if (change.status === "M" || change.status === "D" || change.status === "R") {
       // Skip if MCP already recorded an artifact for this path (MCP takes priority)
-      if (ctx.tracker.artifactExistsByPath(ctx.issueId, ctx.attempt, change.path)) continue;
+      if (ctx.tracker.artifactExistsByPath(ctx.issueUuid, ctx.attempt, change.path)) continue;
       const kindMap = { M: "file_modified", D: "file_removed", R: "file_renamed" } as const;
       ctx.tracker.insertArtifact({
-        issue_id: ctx.issueId,
+        issue_uuid: ctx.issueUuid,
         attempt: ctx.attempt,
         source: "git_diff",
         kind: kindMap[change.status],

@@ -30,10 +30,12 @@ describe("issues routes - null tolerance", () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
+    expect(typeof body.id).toBe("number");
+    expect(typeof body.uuid).toBe("string");
     expect(body.identifier).toMatch(/^TASK-\d+$/);
   });
 
-  test("POST with description and workspace_path as null should succeed", async () => {
+  test("POST with identifier field should be rejected with 400", async () => {
     const { app } = makeApp();
     const res = await app.request("/issues", {
       method: "POST",
@@ -49,11 +51,27 @@ describe("issues routes - null tolerance", () => {
       }),
     });
 
+    expect(res.status).toBe(400);
+  });
+
+  test("POST with description and workspace_path as null should succeed when no identifier", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/issues", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Test null fields",
+        priority: "medium",
+        state: "todo",
+        description: null,
+        workspace_path: null,
+        labels: [],
+      }),
+    });
+
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.identifier).toBe("NULL-1");
     expect(body.title).toBe("Test null fields");
-    // Description and workspace_path should be stored as null or undefined, both are acceptable
   });
 
   test("POST with completely omitted optional fields should succeed", async () => {
@@ -62,7 +80,6 @@ describe("issues routes - null tolerance", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        identifier: "OMIT-1",
         title: "Test omitted fields",
         priority: "medium",
         state: "todo",
@@ -72,7 +89,7 @@ describe("issues routes - null tolerance", () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.identifier).toBe("OMIT-1");
+    expect(body.identifier).toMatch(/^TASK-\d+$/);
   });
 
   test("POST with description as empty string should succeed", async () => {
@@ -81,7 +98,6 @@ describe("issues routes - null tolerance", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        identifier: "EMPTY-1",
         title: "Test empty string",
         priority: "medium",
         state: "todo",
@@ -92,7 +108,7 @@ describe("issues routes - null tolerance", () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.identifier).toBe("EMPTY-1");
+    expect(body.identifier).toMatch(/^TASK-\d+$/);
   });
 
   test("POST with invalid state should fail with 400", async () => {
@@ -101,7 +117,6 @@ describe("issues routes - null tolerance", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        identifier: "BAD-1",
         title: "Invalid state",
         priority: "medium",
         state: "fictional",
@@ -114,17 +129,15 @@ describe("issues routes - null tolerance", () => {
 
   test("PUT with description as null should succeed", async () => {
     const { app, tracker } = makeApp();
-    // Create an issue first
-    tracker.insertIssue({
-      id: "test-id-1",
-      identifier: "PUT-1",
+    const issue = tracker.insertIssue({
+      uuid: "test-uuid-1",
       title: "Original title",
       state: "todo",
       priority: "medium",
       labels: [],
     });
 
-    const res = await app.request("/issues/test-id-1", {
+    const res = await app.request("/issues/" + issue.uuid, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -134,22 +147,20 @@ describe("issues routes - null tolerance", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.id).toBe("test-id-1");
+    expect(body.uuid).toBe(issue.uuid);
   });
 
   test("PUT attempting to change identifier should fail with 400", async () => {
     const { app, tracker } = makeApp();
-    // Create an issue first
-    tracker.insertIssue({
-      id: "test-id-2",
-      identifier: "PUT-2",
+    const issue = tracker.insertIssue({
+      uuid: "test-uuid-2",
       title: "Original title",
       state: "todo",
       priority: "medium",
       labels: [],
     });
 
-    const res = await app.request("/issues/test-id-2", {
+    const res = await app.request("/issues/" + issue.uuid, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -162,17 +173,15 @@ describe("issues routes - null tolerance", () => {
 
   test("PUT with invalid state should fail with 400", async () => {
     const { app, tracker } = makeApp();
-    // Create an issue first
-    tracker.insertIssue({
-      id: "test-id-3",
-      identifier: "PUT-3",
+    const issue = tracker.insertIssue({
+      uuid: "test-uuid-3",
       title: "Original title",
       state: "todo",
       priority: "medium",
       labels: [],
     });
 
-    const res = await app.request("/issues/test-id-3", {
+    const res = await app.request("/issues/" + issue.uuid, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -185,17 +194,17 @@ describe("issues routes - null tolerance", () => {
 });
 
 describe("plan workflow routes", () => {
-  test("GET /issues/:id/plan returns 404 when no plan submitted", async () => {
+  test("GET /issues/:uuid/plan returns 404 when no plan submitted", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/plan");
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/plan");
     expect(res.status).toBe(404);
   });
 
   test("POST /approve-plan transitions plan_review issue to in_progress", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/approve-plan", {
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/approve-plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -204,14 +213,14 @@ describe("plan workflow routes", () => {
     const body = await res.json() as { ok: boolean; state: string };
     expect(body.ok).toBe(true);
     expect(body.state).toBe("in_progress");
-    expect(tracker.getIssue("plan-1")!.state).toBe("in_progress");
-    expect(tracker.getLatestEventByKind("plan-1", "plan_approved")).toBeDefined();
+    expect(tracker.getIssue(issue.uuid)!.state).toBe("in_progress");
+    expect(tracker.getLatestEventByKind(issue.uuid, "plan_approved")).toBeDefined();
   });
 
   test("POST /approve-plan returns 400 when issue is not in plan_review state", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "in_progress", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/approve-plan", {
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "in_progress", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/approve-plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -221,8 +230,8 @@ describe("plan workflow routes", () => {
 
   test("POST /revise-plan transitions plan_review issue back to planning", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/revise-plan", {
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/revise-plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: "Step 3 needs rethinking" }),
@@ -231,14 +240,14 @@ describe("plan workflow routes", () => {
     const body = await res.json() as { ok: boolean; state: string };
     expect(body.ok).toBe(true);
     expect(body.state).toBe("planning");
-    expect(tracker.getIssue("plan-1")!.state).toBe("planning");
-    expect(tracker.getLatestEventByKind("plan-1", "plan_revision_requested")).toBeDefined();
+    expect(tracker.getIssue(issue.uuid)!.state).toBe("planning");
+    expect(tracker.getLatestEventByKind(issue.uuid, "plan_revision_requested")).toBeDefined();
   });
 
   test("POST /revise-plan returns 400 when issue is not in plan_review state", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "todo", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/revise-plan", {
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "todo", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/revise-plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: "Some feedback" }),
@@ -248,8 +257,8 @@ describe("plan workflow routes", () => {
 
   test("POST /revise-plan returns 400 when note is missing", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
-    const res = await app.request("/issues/plan-1/revise-plan", {
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "plan_review", priority: "medium", labels: [] });
+    const res = await app.request("/issues/" + issue.uuid + "/revise-plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -257,18 +266,18 @@ describe("plan workflow routes", () => {
     expect(res.status).toBe(400);
   });
 
-  test("PUT /issues/:id accepts planning and plan_review as valid states", async () => {
+  test("PUT /issues/:uuid accepts planning and plan_review as valid states", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "plan-1", identifier: "PLAN-1", title: "Plan issue", state: "todo", priority: "medium", labels: [] });
+    const issue = tracker.insertIssue({ uuid: "plan-1", title: "Plan issue", state: "todo", priority: "medium", labels: [] });
 
-    const res1 = await app.request("/issues/plan-1", {
+    const res1 = await app.request("/issues/" + issue.uuid, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ state: "planning" }),
     });
     expect(res1.status).toBe(200);
 
-    const res2 = await app.request("/issues/plan-1", {
+    const res2 = await app.request("/issues/" + issue.uuid, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ state: "plan_review" }),
@@ -278,11 +287,11 @@ describe("plan workflow routes", () => {
 });
 
 describe("handoff review routes", () => {
-  test("POST /issues/:id/request-changes requires a non-empty note", async () => {
+  test("POST /issues/:uuid/request-changes requires a non-empty note", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "review-1", identifier: "REVIEW-1", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
+    const issue = tracker.insertIssue({ uuid: "review-1", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
 
-    const res = await app.request("/issues/review-1/request-changes", {
+    const res = await app.request("/issues/" + issue.uuid + "/request-changes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -291,11 +300,11 @@ describe("handoff review routes", () => {
     expect(res.status).toBe(400);
   });
 
-  test("POST /issues/:id/request-changes rejects unexpected fields", async () => {
+  test("POST /issues/:uuid/request-changes rejects unexpected fields", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "review-2", identifier: "REVIEW-2", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
+    const issue = tracker.insertIssue({ uuid: "review-2", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
 
-    const res = await app.request("/issues/review-2/request-changes", {
+    const res = await app.request("/issues/" + issue.uuid + "/request-changes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: "Please address feedback", extra: true }),
@@ -304,18 +313,70 @@ describe("handoff review routes", () => {
     expect(res.status).toBe(400);
   });
 
-  test("POST /issues/:id/request-changes moves issue back to todo and records revision_requested", async () => {
+  test("POST /issues/:uuid/request-changes moves issue back to todo and records revision_requested", async () => {
     const { app, tracker } = makeApp();
-    tracker.insertIssue({ id: "review-3", identifier: "REVIEW-3", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
+    const issue = tracker.insertIssue({ uuid: "review-3", title: "Review issue", state: "in_review", priority: "medium", labels: [] });
 
-    const res = await app.request("/issues/review-3/request-changes", {
+    const res = await app.request("/issues/" + issue.uuid + "/request-changes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: "Please rework the handoff" }),
     });
 
     expect(res.status).toBe(200);
-    expect(tracker.getIssue("review-3")!.state).toBe("todo");
-    expect(tracker.getLatestEventByKind("review-3", "revision_requested")?.message).toBe("Please rework the handoff");
+    expect(tracker.getIssue(issue.uuid)!.state).toBe("todo");
+    expect(tracker.getLatestEventByKind(issue.uuid, "revision_requested")?.message).toBe("Please rework the handoff");
+  });
+});
+
+describe("plan run routes", () => {
+  test("POST /plan-runs/:id/reject cancels the run and records rejection details", async () => {
+    const { app, tracker } = makeApp();
+    tracker.insertPlanRun({
+      id: "plan-run-reject-1",
+      script: "return 'ok';",
+      meta: { name: "Rejectable plan", max_issues: 1 },
+    });
+    tracker.updatePlanRunState("plan-run-reject-1", "awaiting_approval");
+
+    const res = await app.request("/plan-runs/plan-run-reject-1/reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Needs changes" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, state: "cancelled" });
+
+    const run = tracker.getPlanRun("plan-run-reject-1");
+    expect(run?.state).toBe("cancelled");
+    expect(run?.approval_status).toBe("rejected");
+    expect(run?.approval_reason).toBe("Needs changes");
+    expect(run?.finished_at).not.toBeNull();
+  });
+
+  test("POST /plan-runs/:id/request-changes cancels the run with a reviewer note", async () => {
+    const { app, tracker } = makeApp();
+    tracker.insertPlanRun({
+      id: "plan-run-request-1",
+      script: "return 'ok';",
+      meta: { name: "Change-requested plan", max_issues: 1 },
+    });
+    tracker.updatePlanRunState("plan-run-request-1", "awaiting_approval");
+
+    const res = await app.request("/plan-runs/plan-run-request-1/request-changes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ suggestion: "Split this into smaller tasks" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, state: "cancelled" });
+
+    const run = tracker.getPlanRun("plan-run-request-1");
+    expect(run?.state).toBe("cancelled");
+    expect(run?.approval_status).toBe("rejected");
+    expect(run?.approval_reason).toBe("Changes requested: Split this into smaller tasks");
+    expect(run?.finished_at).not.toBeNull();
   });
 });
