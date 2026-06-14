@@ -78,4 +78,37 @@ describe("claude-code adapter settings", () => {
     const args = await fs.readFile(argsFile, "utf-8");
     expect(args).toContain("--permission-mode auto");
   });
+
+  test("allows symphony.* MCP tools in spawn invocation", async () => {
+    const workspace = await makeTempDir();
+    const argsFile = path.join(workspace, "args.txt");
+    const binary = path.join(workspace, "fake-claude.sh");
+    await fs.writeFile(
+      binary,
+      [
+        "#!/bin/sh",
+        `echo "$@" > ${argsFile}`,
+        "cat > /dev/null",
+        `printf '%s\\n' '{"type":"result","result":"{\\"status\\":\\"success\\"}"}'`,
+      ].join("\n"),
+      "utf-8"
+    );
+    await fs.chmod(binary, 0o755);
+
+    await spawnAgent({
+      issueUuid: "claude-settings-3",
+      attempt: 0,
+      workspace,
+      prompt: "test",
+      token: "tok",
+      mcpUrl: "http://localhost:4123/mcp",
+      binary,
+      timeoutMs: 5_000,
+      agentKind: "claude-code",
+    });
+
+    const args = await fs.readFile(argsFile, "utf-8");
+    expect(args).toContain("--allowedTools");
+    expect(args).toContain("symphony.*");
+  });
 });

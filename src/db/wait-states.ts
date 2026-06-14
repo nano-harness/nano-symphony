@@ -6,5 +6,5 @@
  * issues are never re-dispatched until the external event moves them back to
  * a schedulable state (e.g. 'todo').
  */
-export const WAIT_STATES = ["awaiting_plan"] as const;
+export const WAIT_STATES = ["awaiting_plan", "blocked"] as const;
 export type WaitState = (typeof WAIT_STATES)[number];

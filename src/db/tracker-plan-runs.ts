@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { readJournal } from "../plan-runtime/journal.ts";
+import type { JournalEntry } from "../plan-runtime/sdk.ts";
 
 export interface PlanRun {
   id: string;
@@ -17,6 +19,17 @@ export interface PlanRun {
   started_at: number | null;
   created_at: number;
   finished_at: number | null;
+}
+
+export interface PlanRunNode {
+  run_id: string;
+  node_key: string;
+  issue_uuid: string | null;
+  state: string;
+  started_at: number | null;
+  finished_at: number | null;
+  result_json: string | null;
+  error: string | null;
 }
 
 export type PlanRunState =
@@ -110,6 +123,22 @@ export function createPlanRunOps(db: Database) {
     SELECT * FROM plan_runs WHERE caller_issue_uuid = ? ORDER BY created_at DESC
   `);
 
+  const upsertPlanRunNodeStmt = db.prepare(`
+    INSERT INTO plan_run_nodes (run_id, node_key, issue_uuid, state, started_at, finished_at, result_json, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id, node_key) DO UPDATE SET
+      issue_uuid = excluded.issue_uuid,
+      state = excluded.state,
+      started_at = COALESCE(excluded.started_at, plan_run_nodes.started_at),
+      finished_at = excluded.finished_at,
+      result_json = excluded.result_json,
+      error = excluded.error
+  `);
+
+  const listPlanRunNodesStmt = db.prepare(`
+    SELECT * FROM plan_run_nodes WHERE run_id = ? ORDER BY started_at ASC, node_key ASC
+  `);
+
   function insertPlanRun(run: {
     id: string;
     caller_issue_uuid?: string | null;
@@ -189,6 +218,36 @@ export function createPlanRunOps(db: Database) {
     return listByCallerStmt.all(callerIssueId) as PlanRun[];
   }
 
+  function getPlanRunJournal(runId: string): JournalEntry[] {
+    return readJournal(runId);
+  }
+
+  function upsertPlanRunNode(node: {
+    run_id: string;
+    node_key: string;
+    issue_uuid?: string | null;
+    state: string;
+    started_at?: number | null;
+    finished_at?: number | null;
+    result?: unknown;
+    error?: string | null;
+  }): void {
+    upsertPlanRunNodeStmt.run(
+      node.run_id,
+      node.node_key,
+      node.issue_uuid ?? null,
+      node.state,
+      node.started_at ?? null,
+      node.finished_at ?? null,
+      node.result !== undefined ? JSON.stringify(node.result) : null,
+      node.error ?? null,
+    );
+  }
+
+  function listPlanRunNodes(runId: string): PlanRunNode[] {
+    return listPlanRunNodesStmt.all(runId) as PlanRunNode[];
+  }
+
   return {
     insertPlanRun,
     getPlanRun,
@@ -205,5 +264,8 @@ export function createPlanRunOps(db: Database) {
     listFinalizedPlanRunsWithCaller,
     listExpiredRunningPlanRuns,
     listPlanRunsByCaller,
+    getPlanRunJournal,
+    upsertPlanRunNode,
+    listPlanRunNodes,
   };
 }

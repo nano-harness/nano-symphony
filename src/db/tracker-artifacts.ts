@@ -58,6 +58,8 @@ export function createArtifactOps(db: Database) {
     SELECT * FROM symphony_artifacts ORDER BY ts DESC LIMIT ?
   `);
 
+
+
   const existsByPathStmt = db.prepare(`
     SELECT 1 FROM symphony_artifacts
     WHERE issue_uuid = ? AND attempt = ? AND path = ?
@@ -133,6 +135,13 @@ export function createArtifactOps(db: Database) {
     return !!existsByPathStmt.get(issueUuid, attempt, filePath);
   }
 
+  function listArtifactsByIssues(issueUuids: string[]): Artifact[] {
+    if (issueUuids.length === 0) return [];
+    const placeholders = issueUuids.map(() => "?").join(", ");
+    const stmt = db.prepare(`SELECT * FROM symphony_artifacts WHERE issue_uuid IN (${placeholders}) ORDER BY ts DESC`);
+    return stmt.all(...issueUuids) as Artifact[];
+  }
+
   return {
     insertArtifact,
     listArtifacts,
@@ -140,5 +149,6 @@ export function createArtifactOps(db: Database) {
     deleteArtifactsByIssue,
     listRecentArtifacts,
     artifactExistsByPath,
+    listArtifactsByIssues,
   };
 }

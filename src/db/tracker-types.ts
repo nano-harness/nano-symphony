@@ -11,10 +11,18 @@ export interface Issue {
   workspace_path: string | null;
   agent_kind: "nano" | "claude-code" | null;
   agent_binary: string | null;
+  agent_role: string | null;
   require_plan: boolean | null;
   plan_run_id: string | null;
   expected_schema: string | null;
   scratchpad: string | null;
+  plan_estimates_json: string | null;
+  plan_actuals_json: string | null;
+  plan_progress_json: string | null;
+  cost_budget_usd: number | null;
+  token_budget: number | null;
+  cost_usd: number | null;
+  token_total: number | null;
   created_at: string;
   updated_at: string;
   labels: string[];
@@ -23,6 +31,7 @@ export interface Issue {
 
 export interface IssueInput {
   uuid: string;
+  identifier?: string | null;
   title: string;
   description?: string | null;
   priority?: string;
@@ -32,10 +41,16 @@ export interface IssueInput {
   workspace_path?: string | null;
   agent_kind?: "nano" | "claude-code" | null;
   agent_binary?: string | null;
+  agent_role?: string | null;
   require_plan?: boolean | null;
   plan_run_id?: string | null;
   expected_schema?: string | null;
   scratchpad?: string | null;
+  plan_estimates_json?: string | null;
+  plan_actuals_json?: string | null;
+  plan_progress_json?: string | null;
+  cost_budget_usd?: number | null;
+  token_budget?: number | null;
   labels?: string[];
 }
 

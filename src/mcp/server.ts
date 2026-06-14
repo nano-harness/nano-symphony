@@ -72,28 +72,5 @@ export function createMcpRouter(
     return c.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "Method not found" } });
   });
 
-  app.get("/sse", (c) => {
-    const token = c.req.header("X-Symphony-Token");
-    if (!token) return c.text("Unauthorized", 401);
-    const auth = verifyToken(token);
-    if (!auth) return c.text("Forbidden", 403);
-
-    return new Response(
-      new ReadableStream({
-        start(controller) {
-          const encoder = new TextEncoder();
-          controller.enqueue(encoder.encode(": ping\n\n"));
-        },
-      }),
-      {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-        },
-      }
-    );
-  });
-
   return app;
 }

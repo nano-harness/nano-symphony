@@ -24,7 +24,18 @@ function renderMcpJson(ctx: SpawnContext): string {
 /** Minimal YAML for nano-specific config (hooks, trusted_binaries, permission_mode) written to .nano/nano.yaml. */
 function renderNanoYaml(ctx: SpawnContext): string {
   const lines: string[] = [];
-  lines.push(`permission_mode: ${ctx.config.permission_mode ?? "auto"}`);
+  const mode = ctx.config.permission_mode ?? "auto";
+  lines.push(`permission_mode: ${mode}`);
+  // In ModeAuto the permission manager only fast-paths a small hardcoded list
+  // of safe MCP tools. The injected symphony MCP server (emit_result,
+  // session_completed, etc.) is not on that list, so headless runs would
+  // reach the confirmation stage and fail-closed. Add an explicit session
+  // allowlist for the trusted symphony MCP namespace.
+  if (mode === "auto") {
+    lines.push("permission_auto:");
+    lines.push("  allow_rules:");
+    lines.push("    - mcp_symphony_*");
+  }
   if (ctx.config.trusted_binaries?.length) {
     lines.push("trusted_binaries:");
     for (const b of ctx.config.trusted_binaries) {

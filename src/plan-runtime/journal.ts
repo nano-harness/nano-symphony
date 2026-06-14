@@ -52,7 +52,7 @@ export function getCompletedIssueResults(runId: string): Map<string, Record<stri
   return results;
 }
 
-/** Stable key for an issue invocation: phase + prompt prefix */
-export function issueKey(phase: string, promptPrefix: string): string {
-  return `${phase}::${promptPrefix}`;
+/** Stable key for an issue invocation: plan run scoped identity. */
+export function issueKey(runId: string, identity: string): string {
+  return `${runId}::${identity}`;
 }

@@ -323,4 +323,135 @@ describe("plan runtime: dag SDK", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("unknown predecessor");
   });
+
+  test("gated issue waits in plan_review until approved", async () => {
+    const tracker = makeTracker();
+    const runId = "run-gate";
+    tracker.insertPlanRun({ id: runId, script: "", meta: { name: "p", max_issues: 5 } });
+
+    // Approve the gated issue after a short delay, then let auto-complete finish it.
+    let approved = false;
+    const approveTimer = setInterval(() => {
+      for (const issue of tracker.listIssuesByPlanRun(runId)) {
+        if (issue.state === "plan_review") {
+          tracker.updateIssueState(issue.uuid, "todo");
+          approved = true;
+        }
+      }
+      if (approved) clearInterval(approveTimer);
+    }, 100);
+
+    const stopAutoComplete = autoCompleteSubIssues(tracker, runId);
+
+    const result = await runPlan({
+      runId,
+      script: `return await issue("Gated work", { gate: true });`,
+      args: null,
+      maxIssues: 5,
+      wallTimeMs: 5_000,
+      tracker,
+      tokenSpent: () => 0,
+      tokenTotal: 0,
+    });
+
+    clearInterval(approveTimer);
+    stopAutoComplete();
+    expect(result.ok).toBe(true);
+  });
+
+  test("reviewer node auto-blocks downstream successor", async () => {
+    const tracker = makeTracker();
+    const runId = `run-reviewer-blocker-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    tracker.insertPlanRun({ id: runId, script: "", meta: { name: "p", max_issues: 5 } });
+
+    // Approve the reviewer quickly so the successor can eventually run.
+    let approved = false;
+    const approveTimer = setInterval(() => {
+      for (const issue of tracker.listIssuesByPlanRun(runId)) {
+        if (issue.state === "plan_review") {
+          tracker.updateIssueState(issue.uuid, "todo");
+          approved = true;
+        }
+      }
+      if (approved) clearInterval(approveTimer);
+    }, 100);
+
+    const stopAutoComplete = autoCompleteSubIssues(tracker, runId);
+
+    const result = await runPlan({
+      runId,
+      script: `
+        return await dag(
+          [{ id: "review", prompt: "Review the design", role: "reviewer", gate: true }, { id: "implement", prompt: "Implement {{review}}" }],
+          [{ from: "review", to: "implement" }]
+        );
+      `,
+      args: null,
+      maxIssues: 5,
+      wallTimeMs: 5_000,
+      tracker,
+      tokenSpent: () => 0,
+      tokenTotal: 0,
+    });
+
+    clearInterval(approveTimer);
+    stopAutoComplete();
+    expect(result.ok, `plan run failed: ${(result as any).error}`).toBe(true);
+
+    const issues = tracker.listIssuesByPlanRun(runId);
+    const implementIssue = issues.find((i) => i.title.includes("Implement"));
+    expect(implementIssue).toBeDefined();
+    if (implementIssue) {
+      expect(implementIssue.blockers.length).toBeGreaterThanOrEqual(1);
+      const reviewIssue = issues.find((i) => i.title.includes("Review"));
+      expect(implementIssue.blockers.some((b) => b.blocker_uuid === reviewIssue?.uuid)).toBe(true);
+    }
+  });
+
+  test("stable resume identity: second run skips already-completed issue", async () => {
+    const tracker = makeTracker();
+    const runId = `run-resume-id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    tracker.insertPlanRun({ id: runId, script: "", meta: { name: "p", max_issues: 5 } });
+
+    // Clear any leftover journal from a previous test run.
+    try {
+      const journalPath = `.symphony/plan-runs/${runId}/journal.jsonl`;
+      await import("node:fs").then((fs) => fs.rmSync(journalPath, { recursive: true, force: true }));
+    } catch { /* ignore */ }
+
+    const stopAutoComplete = autoCompleteSubIssues(tracker, runId);
+
+    // First run: creates and completes one sub-issue.
+    const result1 = await runPlan({
+      runId,
+      script: `return await issue("Do work", { key: "my-task" });`,
+      args: null,
+      maxIssues: 5,
+      wallTimeMs: 5_000,
+      tracker,
+      tokenSpent: () => 0,
+      tokenTotal: 0,
+    });
+    stopAutoComplete();
+    expect(result1.ok).toBe(true);
+
+    const issuesAfterFirst = tracker.listIssuesByPlanRun(runId).length;
+    expect(issuesAfterFirst).toBeGreaterThanOrEqual(1);
+
+    // Second run: same plan key, but prompt can differ. Should resume, not create new issue.
+    const stopAutoComplete2 = autoCompleteSubIssues(tracker, runId);
+    const result2 = await runPlan({
+      runId,
+      script: `return await issue("Do work with a different prompt wording", { key: "my-task" });`,
+      args: null,
+      maxIssues: 5,
+      wallTimeMs: 5_000,
+      tracker,
+      tokenSpent: () => 0,
+      tokenTotal: 0,
+    });
+    stopAutoComplete2();
+    expect(result2.ok).toBe(true);
+    expect(tracker.listIssuesByPlanRun(runId).length).toBe(issuesAfterFirst);
+  });
 });

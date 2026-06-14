@@ -1,12 +1,13 @@
-import { createSignal, createEffect, onMount, onCleanup, For, Show } from "solid-js";
+import { createSignal, createEffect, createMemo, onMount, onCleanup, For, Show } from "solid-js";
 import { useParams, useNavigate, A } from "@solidjs/router";
-import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment, type PlanRun } from "./api";
+import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment, type PlanRun, type JournalEntry, type PlanRunNode, type LlmCall } from "./api";
 import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
 import { PlanReviewPanel } from "./PlanReviewPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { EventBody } from "./EventBody";
 import { LogViewer } from "./LogViewer";
+import { PlanRunCreator } from "./PlanRunCreator";
 
 const AGENT_DISPLAY_NAMES: Record<string, string> = {
   "nano": "Nano",
@@ -29,20 +30,32 @@ export function IssueDetail() {
   const [retriggerNote, setRetriggerNote] = createSignal("");
   const [showCancelConfirm, setShowCancelConfirm] = createSignal(false);
   const [planRuns, setPlanRuns] = createSignal<PlanRun[]>([]);
+  const [allIssues, setAllIssues] = createSignal<Issue[]>([]);
+  const [showAddBlocker, setShowAddBlocker] = createSignal(false);
+  const [llmCalls, setLlmCalls] = createSignal<LlmCall[]>([]);
+  const [relatedArtifacts, setRelatedArtifacts] = createSignal<Artifact[]>([]);
+  const [showActualsForm, setShowActualsForm] = createSignal(false);
+  const [actualTurns, setActualTurns] = createSignal("");
+  const [actualFiles, setActualFiles] = createSignal("");
+  const [actualComplexity, setActualComplexity] = createSignal<"" | "low" | "medium" | "high">("");
 
   const load = async () => {
-    const [i, e, r, c, pr] = await Promise.all([
+    const [i, e, r, c, pr, llc, ra] = await Promise.all([
       api.getIssue(params.uuid),
       api.getEvents(),
       api.getRun(params.uuid).catch(() => null),
       api.listComments(params.uuid).catch(() => []),
       api.listPlanRuns(params.uuid).catch(() => []),
+      api.getLlmCalls(params.uuid).catch(() => ({ issue_uuid: params.uuid, calls: [] })),
+      api.getRelatedArtifacts(params.uuid).catch(() => ({ related_issue_uuids: [], artifacts: [] })),
     ]);
     setIssue(i);
     setEvents(e.filter((ev) => ev.issue_uuid === params.uuid).sort((a, b) => a.ts - b.ts));
     setRun(r);
     setComments(c);
     setPlanRuns(pr);
+    setLlmCalls(llc.calls);
+    setRelatedArtifacts(ra.artifacts);
   };
 
   // Refresh issue and run data (for live updates)
@@ -236,6 +249,12 @@ export function IssueDetail() {
     return date.toLocaleString();
   };
 
+  const formatArtifactSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   const tryParsePayload = (payloadJson: string | null) => {
     if (!payloadJson) return null;
     try {
@@ -244,6 +263,16 @@ export function IssueDetail() {
       return null;
     }
   };
+
+  const planProgress = createMemo(() => {
+    const json = issue()?.plan_progress_json;
+    if (!json) return null;
+    try {
+      return JSON.parse(json) as { total: number; done: number; cancelled: number; blocked: number; in_progress: number; percent: number };
+    } catch {
+      return null;
+    }
+  });
 
   return (
     <div class="page">
@@ -289,14 +318,86 @@ export function IssueDetail() {
                 </div>
               </div>
               <div class="issue-meta">
+                <span class="pill mono">{issue()!.identifier}</span>
                 <span class={`pill ${issue()!.state}`}>{issue()!.state.replace("_", " ")}</span>
                 <span class="pill">{issue()!.priority}</span>
+                <Show when={issue()!.agent_role}>
+                  <span class="pill role">role: {issue()!.agent_role}</span>
+                </Show>
+                <Show when={issue()!.state === "plan_review" && issue()!.labels.includes("plan-sub-task")}>
+                  <span class="pill gate">⏸ gate</span>
+                </Show>
                 <Show when={issue()!.labels.length > 0}>
                   <For each={issue()!.labels}>
                     {(label) => <span class="pill">{label}</span>}
                   </For>
                 </Show>
               </div>
+            </div>
+
+            <div class="issue-section">
+              <div class="section-header">
+                <h2 class="section-title">Blockers ({issue()!.blockers.length})</h2>
+                <button
+                  class="btn btn-secondary btn-small"
+                  onClick={() => {
+                    api.listIssues().then(setAllIssues).catch(() => {});
+                    setShowAddBlocker(true);
+                  }}
+                >
+                  + Add
+                </button>
+              </div>
+              <Show when={issue()!.blockers.length > 0}>
+                <ul class="blockers-list">
+                  <For each={issue()!.blockers}>
+                    {(b) => {
+                      const blockerIssue = allIssues().find((i) => i.uuid === b.blocker_uuid);
+                      return (
+                        <li class="blocker-item">
+                          <A href={`/issues/${b.blocker_uuid}`} class="blocker-link">
+                            {blockerIssue ? `${blockerIssue.identifier}: ${blockerIssue.title}` : b.blocker_uuid}
+                          </A>
+                          <span class={`pill ${b.blocker_state}`}>{b.blocker_state.replace("_", " ")}</span>
+                          <button
+                            class="btn btn-icon btn-small"
+                            title="Remove blocker"
+                            onClick={() => api.removeBlocker(params.uuid, b.blocker_uuid).then(load).catch((err) => setToast({ message: err.message, type: "error" }))}
+                          >
+                            ×
+                          </button>
+                        </li>
+                      );
+                    }}
+                  </For>
+                </ul>
+              </Show>
+              <Show when={issue()!.blockers.length === 0}>
+                <p style={{ "color": "var(--mute)", "font-size": "13px" }}>No blockers.</p>
+              </Show>
+              <Show when={showAddBlocker()}>
+                <div class="blocker-add-form">
+                  <select
+                    class="form-select"
+                    onChange={(e) => {
+                      const uuid = e.currentTarget.value;
+                      if (!uuid) return;
+                      api.addBlocker(params.uuid, uuid).then(() => {
+                        setShowAddBlocker(false);
+                        load();
+                      }).catch((err) => setToast({ message: err.message, type: "error" }));
+                    }}
+                  >
+                    <option value="">Select an issue...</option>
+                    <For each={allIssues().filter((i) => i.uuid !== params.uuid && !issue()!.blockers.some((b) => b.blocker_uuid === i.uuid))}>
+                      {(i) => <option value={i.uuid}>{i.identifier}: {i.title}</option>}
+                    </For>
+                  </select>
+                  <button class="btn btn-secondary btn-small" onClick={() => setShowAddBlocker(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </Show>
             </div>
 
             <Show when={issue()!.description}>
@@ -314,9 +415,121 @@ export function IssueDetail() {
               onAction={() => { load(); }}
             />
 
-            <Show when={planRuns().length > 0}>
+            <Show when={issue()!.plan_estimates_json || issue()!.plan_actuals_json}>
               <div class="issue-section">
-                <h2 class="section-title">Plan Runs ({planRuns().length})</h2>
+                <h2 class="section-title">Plan Estimates vs Actuals</h2>
+                <div class="plan-estimates-actuals">
+                  <For each={[
+                    { key: "complexity", label: "Complexity", format: (v: unknown) => String(v) },
+                    { key: "files_touched", label: "Files touched", format: (v: unknown) => String(v) },
+                    { key: "estimated_turns", label: "Turns", format: (v: unknown) => String(v) },
+                  ]}>
+                    {(metric) => {
+                      const estimates = issue()!.plan_estimates_json ? JSON.parse(issue()!.plan_estimates_json!) as Record<string, unknown> : {};
+                      const actuals = issue()!.plan_actuals_json ? JSON.parse(issue()!.plan_actuals_json!) as Record<string, unknown> : {};
+                      const estValue = estimates[metric.key];
+                      const actValue = actuals[`actual_${metric.key === "estimated_turns" ? "turns" : metric.key === "files_touched" ? "files_touched" : "complexity"}`];
+                      if (estValue === undefined && actValue === undefined) return null;
+                      return (
+                        <div class="estimate-actual-row">
+                          <span class="estimate-actual-label">{metric.label}</span>
+                          <span class="estimate-actual-value">Est: {estValue !== undefined ? metric.format(estValue) : "—"}</span>
+                          <span class="estimate-actual-value">Act: {actValue !== undefined ? metric.format(actValue) : "—"}</span>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+                <Show when={!["backlog", "planning", "plan_review"].includes(issue()!.state)}>
+                  <button class="btn btn-secondary btn-small" onClick={() => setShowActualsForm((s) => !s)}>
+                    {showActualsForm() ? "Cancel" : "Record actuals"}
+                  </button>
+                </Show>
+                <Show when={showActualsForm()}>
+                  <div class="actuals-form">
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                      <label style="display: flex; flex-direction: column; gap: 4px;">
+                        <span style="font-size: 12px; color: var(--mute);">Actual turns</span>
+                        <input
+                          class="form-input"
+                          type="number"
+                          min="0"
+                          value={actualTurns()}
+                          onInput={(e) => setActualTurns(e.currentTarget.value)}
+                          style="width: 120px;"
+                        />
+                      </label>
+                      <label style="display: flex; flex-direction: column; gap: 4px;">
+                        <span style="font-size: 12px; color: var(--mute);">Actual files touched</span>
+                        <input
+                          class="form-input"
+                          type="number"
+                          min="0"
+                          value={actualFiles()}
+                          onInput={(e) => setActualFiles(e.currentTarget.value)}
+                          style="width: 120px;"
+                        />
+                      </label>
+                      <label style="display: flex; flex-direction: column; gap: 4px;">
+                        <span style="font-size: 12px; color: var(--mute);">Actual complexity</span>
+                        <select
+                          class="form-input"
+                          value={actualComplexity()}
+                          onChange={(e) => setActualComplexity(e.currentTarget.value as "" | "low" | "medium" | "high")}
+                          style="width: 120px;"
+                        >
+                          <option value="">—</option>
+                          <option value="low">Low</option>
+                          <option value="medium">Medium</option>
+                          <option value="high">High</option>
+                        </select>
+                      </label>
+                    </div>
+                    <button
+                      class="btn btn-primary btn-small"
+                      onClick={() => {
+                        const payload: { actual_turns?: number; actual_files_touched?: number; actual_complexity?: "low" | "medium" | "high" } = {};
+                        const turns = actualTurns().trim();
+                        if (turns !== "") payload.actual_turns = Number(turns);
+                        const files = actualFiles().trim();
+                        if (files !== "") payload.actual_files_touched = Number(files);
+                        if (actualComplexity()) payload.actual_complexity = actualComplexity();
+                        api.setPlanActuals(params.uuid, payload).then(() => {
+                          setShowActualsForm(false);
+                          load();
+                        }).catch((err) => setToast({ message: err.message, type: "error" }));
+                      }}
+                    >
+                      Save actuals
+                    </button>
+                  </div>
+                </Show>
+              </div>
+            </Show>
+
+            <Show when={planProgress()}>
+              <div class="issue-section">
+                <h2 class="section-title">Sub-issue Progress</h2>
+                <div class="progress-bar">
+                  <div
+                    class="progress-bar-fill"
+                    style={{ width: `${planProgress()!.percent}%` }}
+                  />
+                </div>
+                <div class="progress-stats">
+                  <span>{planProgress()!.done} done</span>
+                  <span>{planProgress()!.in_progress} in progress</span>
+                  <span>{planProgress()!.cancelled} cancelled</span>
+                  <span>{planProgress()!.blocked} blocked</span>
+                  <span>{planProgress()!.percent}%</span>
+                </div>
+              </div>
+            </Show>
+
+            <div class="issue-section">
+              <h2 class="section-title">Plan Runs ({planRuns().length})</h2>
+              <PlanRunCreator callerIssueUuid={params.uuid} onCreated={load} />
+              <Show when={planRuns().length > 0}>
                 <For each={planRuns()}>
                   {(pr) => (
                     <div class="plan-run-card">
@@ -332,6 +545,26 @@ export function IssueDetail() {
                               catch { return "Unnamed"; }
                             })()}
                           </span>
+                        </div>
+                      </Show>
+                      <Show when={pr.state === "awaiting_approval"}>
+                        <div class="plan-run-actions">
+                          <button
+                            class="btn btn-primary btn-small"
+                            onClick={() => api.approvePlanRun(pr.id).then(load).catch((err) => setToast({ message: err.message, type: "error" }))}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            class="btn btn-secondary btn-small"
+                            onClick={() => {
+                              const reason = window.prompt("Reject reason (optional):");
+                              if (reason === null) return;
+                              api.rejectPlanRun(pr.id, reason || undefined).then(load).catch((err) => setToast({ message: err.message, type: "error" }));
+                            }}
+                          >
+                            Reject
+                          </button>
                         </div>
                       </Show>
                       <Show when={pr.dry_run_summary}>
@@ -350,9 +583,36 @@ export function IssueDetail() {
                           </details>
                         </div>
                       </Show>
+                      <PlanRunNodes runId={pr.id} />
+                      <PlanRunJournal runId={pr.id} />
                     </div>
                   )}
                 </For>
+              </Show>
+              <Show when={planRuns().length === 0}>
+                <p style={{ "color": "var(--mute)", "font-size": "13px" }}>No plan runs yet.</p>
+              </Show>
+            </div>
+
+            <Show when={relatedArtifacts().length > 0}>
+              <div class="issue-section">
+                <h2 class="section-title">Related Artifacts</h2>
+                <ul class="artifacts-list">
+                  <For each={relatedArtifacts()}>
+                    {(artifact) => (
+                      <li class="artifact-row">
+                        <A href={`/issues/${artifact.issue_uuid}`} class="artifact-header">
+                          <span class={`artifact-kind ${artifact.kind}`}>{artifact.kind.replace(/_/g, " ")}</span>
+                          <span class="artifact-label">{artifact.label ?? artifact.id}</span>
+                          <span class="artifact-meta">
+                            <span class="artifact-size">{formatArtifactSize(artifact.content_size)}</span>
+                            <span class="artifact-attempt">attempt {artifact.attempt}</span>
+                          </span>
+                        </A>
+                      </li>
+                    )}
+                  </For>
+                </ul>
               </div>
             </Show>
 
@@ -394,6 +654,43 @@ export function IssueDetail() {
               <div class="issue-section">
                 <h2 class="section-title">III. STAGE — Live transcript</h2>
                 <LogViewer rawText={logs()} agentKind={issue()!.agent_kind} />
+              </div>
+            </Show>
+
+            <Show when={llmCalls().length > 0}>
+              <div class="issue-section">
+                <h2 class="section-title">LLM Calls ({llmCalls().length})</h2>
+                <div class="handoff-metrics" style={{ "margin-bottom": "12px" }}>
+                  {(() => {
+                    const totalCost = llmCalls().reduce((sum, c) => sum + (c.cost_usd ?? 0), 0);
+                    const totalTokens = llmCalls().reduce((sum, c) => sum + c.input_tokens + c.output_tokens, 0);
+                    return (
+                      <>
+                        <span class="metric">${totalCost.toFixed(4)}</span>
+                        <span class="metric">{totalTokens.toLocaleString()} tokens</span>
+                      </>
+                    );
+                  })()}
+                </div>
+                <ul class="journal-list">
+                  <For each={llmCalls()}>
+                    {(call) => (
+                      <li class="journal-entry">
+                        <span class="journal-time">Attempt {call.attempt}</span>
+                        <span class="journal-type">{call.provider}</span>
+                        <span class="journal-title">
+                          {call.model} · {call.input_tokens.toLocaleString()} in / {call.output_tokens.toLocaleString()} out
+                          <Show when={call.cost_usd != null}>
+                            · ${(call.cost_usd ?? 0).toFixed(4)}
+                          </Show>
+                          <Show when={call.duration_ms != null}>
+                            · {(call.duration_ms ?? 0) / 1000}s
+                          </Show>
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
               </div>
             </Show>
 
@@ -463,6 +760,46 @@ export function IssueDetail() {
                   </div>
                 </div>
               </Show>
+            </Show>
+
+            <Show when={issue()!.cost_budget_usd != null || issue()!.token_budget != null}>
+              <div class="aside-field">
+                <div class="aside-label">Budget</div>
+                <div class="aside-value" style="width: 100%;">
+                  {(() => {
+                    const totalCost = llmCalls().reduce((sum, c) => sum + (c.cost_usd ?? 0), 0);
+                    const totalTokens = llmCalls().reduce((sum, c) => sum + c.input_tokens + c.output_tokens, 0);
+                    return (
+                      <>
+                        <Show when={issue()!.cost_budget_usd != null}>
+                          <div class="budget-row">
+                            <span class="budget-label">Cost</span>
+                            <div class="budget-bar">
+                              <div
+                                class={`budget-bar-fill ${totalCost > issue()!.cost_budget_usd! ? "exceeded" : ""}`}
+                                style={{ width: `${Math.min(100, (totalCost / issue()!.cost_budget_usd!) * 100)}%` }}
+                              />
+                            </div>
+                            <span class="budget-value">${totalCost.toFixed(2)} / ${issue()!.cost_budget_usd!.toFixed(2)}</span>
+                          </div>
+                        </Show>
+                        <Show when={issue()!.token_budget != null}>
+                          <div class="budget-row">
+                            <span class="budget-label">Tokens</span>
+                            <div class="budget-bar">
+                              <div
+                                class={`budget-bar-fill ${totalTokens > issue()!.token_budget! ? "exceeded" : ""}`}
+                                style={{ width: `${Math.min(100, (totalTokens / issue()!.token_budget!) * 100)}%` }}
+                              />
+                            </div>
+                            <span class="budget-value">{totalTokens.toLocaleString()} / {issue()!.token_budget!.toLocaleString()}</span>
+                          </div>
+                        </Show>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
             </Show>
             <div class="aside-field">
               <div class="aside-label">Created</div>
@@ -603,6 +940,114 @@ export function IssueDetail() {
           <div class={`toast ${toast()!.type}`}>{toast()!.message}</div>
         </div>
       </Show>
+    </div>
+  );
+}
+
+function PlanRunJournal(props: { runId: string }) {
+  const [entries, setEntries] = createSignal<JournalEntry[]>([]);
+  const [loaded, setLoaded] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const load = async () => {
+    if (loaded()) return;
+    try {
+      const res = await api.getPlanRunJournal(props.runId);
+      setEntries(res.entries);
+      setLoaded(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString();
+
+  const entryTitle = (entry: JournalEntry) => {
+    switch (entry.type) {
+      case "phase": return `Phase: ${entry.payload.title ?? entry.payload.msg ?? ""}`;
+      case "issue_start": return `Start: ${entry.payload.key ?? entry.payload.prompt ?? ""}`;
+      case "issue_done": return `Done: ${entry.payload.key ?? ""}`;
+      case "issue_error": return `Error: ${entry.payload.key ?? ""}`;
+      case "parallel_start": return "Parallel batch started";
+      case "parallel_done": return "Parallel batch done";
+      case "dag_start": return "DAG started";
+      case "dag_done": return "DAG done";
+      case "dag_error": return `DAG error: ${entry.payload.error ?? ""}`;
+      case "log": return entry.payload.msg ?? "Log";
+      default: return entry.type;
+    }
+  };
+
+  return (
+    <div class="plan-run-summary">
+      <details onToggle={(e) => { if ((e.currentTarget as HTMLDetailsElement).open) load(); }}>
+        <summary>Journal</summary>
+        <Show when={error()}>
+          <p style={{ color: "var(--error)", "font-size": "12px" }}>{error()}</p>
+        </Show>
+        <Show when={!error() && entries().length === 0 && loaded()}>
+          <p style={{ color: "var(--mute)", "font-size": "12px" }}>No journal entries yet.</p>
+        </Show>
+        <Show when={entries().length > 0}>
+          <ul class="journal-list">
+            <For each={entries()}>
+              {(entry) => (
+                <li class={`journal-entry journal-entry-${entry.type}`}>
+                  <span class="journal-time">{formatTime(entry.ts)}</span>
+                  <span class="journal-type">{entry.type}</span>
+                  <span class="journal-title">{entryTitle(entry)}</span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </details>
+    </div>
+  );
+}
+
+function PlanRunNodes(props: { runId: string }) {
+  const [nodes, setNodes] = createSignal<PlanRunNode[]>([]);
+  const [loaded, setLoaded] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const load = async () => {
+    if (loaded()) return;
+    try {
+      const res = await api.getPlanRunNodes(props.runId);
+      setNodes(res.nodes);
+      setLoaded(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const formatTime = (ts: number | null) => ts ? new Date(ts).toLocaleTimeString() : "—";
+
+  return (
+    <div class="plan-run-summary">
+      <details onToggle={(e) => { if ((e.currentTarget as HTMLDetailsElement).open) load(); }}>
+        <summary>Nodes ({nodes().length})</summary>
+        <Show when={error()}>
+          <p style={{ color: "var(--error)", "font-size": "12px" }}>{error()}</p>
+        </Show>
+        <Show when={!error() && nodes().length === 0 && loaded()}>
+          <p style={{ color: "var(--mute)", "font-size": "12px" }}>No node records yet.</p>
+        </Show>
+        <Show when={nodes().length > 0}>
+          <ul class="journal-list">
+            <For each={nodes()}>
+              {(node) => (
+                <li class={`journal-entry journal-entry-${node.state}`}>
+                  <span class="journal-time">{formatTime(node.started_at)}</span>
+                  <span class={`pill ${node.state}`}>{node.state}</span>
+                  <span class="journal-title">{node.node_key}</span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </details>
     </div>
   );
 }

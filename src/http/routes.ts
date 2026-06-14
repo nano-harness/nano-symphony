@@ -6,15 +6,19 @@ import path from "path";
 import { nanoid } from "nanoid";
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
+import { loadWorkflow } from "../workflow/loader.ts";
 import { config } from "../config.ts";
 import { z } from "zod";
 import { nullishString } from "./schemas.ts";
 import { bus } from "../db/event_bus.ts";
-import type { SymphonyEvent, SymphonyRun } from "../db/tracker.ts";
+import type { SymphonyEvent, SymphonyRun, IssueMetrics } from "../db/tracker.ts";
 import type { RunPatch } from "../db/event_bus.ts";
 import { cancelAgent, getActiveProcessCount } from "../spawner/index.ts";
 import { removeWorkspace } from "../workspace/manager.ts";
 import type { PlanRunState } from "../db/tracker-plan-runs.ts";
+import { renderMetrics, incCounter } from "../metrics.ts";
+import { computePlanDiff, type PlanPayload } from "./plan-diff.ts";
+import { computePlanGraph } from "./plan-graph.ts";
 
 const VALID_STATES = ["backlog", "todo", "awaiting_plan", "planning", "plan_review", "in_progress", "in_review", "done", "cancelled"] as const;
 const AgentKindEnum = z.enum(["nano", "claude-code"]).nullable().optional();
@@ -33,6 +37,7 @@ let activeSSECount = 0;
 
 const IssueCreateSchema = z.object({
   title: z.string().min(1, "title is required").max(200),
+  identifier: z.string().min(1).max(64).nullable().optional(),
   description: nullishString({ max: 20000 }),
   priority: z.enum(["urgent", "high", "medium", "low"]).default("medium"),
   state: z.enum(VALID_STATES),
@@ -40,12 +45,17 @@ const IssueCreateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
+  agent_binary: nullishString({ max: 256 }),
+  agent_role: nullishString({ max: 64 }),
   require_plan: z.boolean().nullable().optional(),
+  cost_budget_usd: z.number().min(0).nullable().optional(),
+  token_budget: z.number().int().min(0).nullable().optional(),
   labels: z.array(z.string()).default([]),
 }).strict();
 
 const IssueUpdateSchema = z.object({
   title: z.string().min(1).max(200).optional(),
+  identifier: z.string().min(1).max(64).nullable().optional(),
   description: nullishString({ max: 20000 }),
   priority: z.enum(["urgent", "high", "medium", "low"]).optional(),
   state: z.enum(VALID_STATES).optional(),
@@ -53,19 +63,37 @@ const IssueUpdateSchema = z.object({
   url: nullishString(),
   workspace_path: nullishString({ max: 1024 }),
   agent_kind: AgentKindEnum,
+  agent_binary: nullishString({ max: 256 }),
+  agent_role: nullishString({ max: 64 }),
   require_plan: z.boolean().nullable().optional(),
+  cost_budget_usd: z.number().min(0).nullable().optional(),
+  token_budget: z.number().int().min(0).nullable().optional(),
   labels: z.array(z.string()).optional(),
-}).strict(); // Reject unexpected fields like identifier or id
+}).strict();
 
 const RequestChangesSchema = z.object({
   note: z.string().trim().min(1, "note is required").max(8000),
+  feedback: z.object({
+    category: z.enum(["scope", "approach", "estimate", "missing_tests", "other"]),
+    severity: z.enum(["minor", "major", "blocking"]),
+    must_fix: z.array(z.string().trim().min(1)).max(20).optional(),
+  }).optional(),
 }).strict();
+
+const PlanRevisionFeedbackSchema = z.object({
+  category: z.enum(["scope", "approach", "estimate", "missing_tests", "other"]),
+  severity: z.enum(["minor", "major", "blocking"]),
+  must_fix: z.array(z.string().trim().min(1)).max(20).optional(),
+});
 
 export function createRoutes(
   tracker: Tracker,
   _getWorkflow: () => { workflow: Workflow; template: string } | undefined,
   triggerTick: () => void,
-  options?: { reloadWorkflow?: () => { workflow: Workflow; template: string } | null },
+  options?: {
+    reloadWorkflow?: () => { workflow: Workflow; template: string } | null;
+    getConcurrencyStatus?: () => { limit: number; available: number; active: number };
+  },
 ): Hono {
   const app = new Hono();
   const startedAt = Date.now();
@@ -80,22 +108,85 @@ export function createRoutes(
     if (!issue) return { ok: false, error: "Not found" };
     if (issue.state !== "plan_review") return { ok: false, error: "Issue is not in plan_review state" };
     tracker.updateIssueState(uuid, "in_progress");
+    const planEvent = tracker.getLatestEventByKind(uuid, "plan_submitted");
+    if (planEvent) {
+      const payload = JSON.parse(planEvent.payload_json ?? "{}") as { estimates?: Record<string, unknown> };
+      if (payload.estimates) tracker.updateIssuePlanEstimates(uuid, payload.estimates);
+    }
     tracker.recordEvent(uuid, "plan_approved", note ?? "Plan approved", { note });
     releaseForReschedule(uuid);
     triggerTick();
     return { ok: true, state: "in_progress" };
   }
 
-  function revisePlan(uuid: string, note: string): { ok: boolean; state?: string; error?: string } {
+  function revisePlan(
+    uuid: string,
+    note: string,
+    feedback?: z.infer<typeof PlanRevisionFeedbackSchema>,
+  ): { ok: boolean; state?: string; error?: string } {
     const issue = tracker.getIssue(uuid);
     if (!issue) return { ok: false, error: "Not found" };
     if (issue.state !== "plan_review") return { ok: false, error: "Issue is not in plan_review state" };
     tracker.updateIssueState(uuid, "planning");
-    tracker.recordEvent(uuid, "plan_revision_requested", note, { note });
+    tracker.recordEvent(uuid, "plan_revision_requested", note, { note, feedback });
     releaseForReschedule(uuid);
     triggerTick();
     return { ok: true, state: "planning" };
   }
+
+  app.get("/metrics", (c) => {
+    // Snapshot current entity counts so /metrics always reflects the DB state.
+    const issues = tracker.listIssues();
+    const planRuns = tracker.listPlanRuns();
+    incCounter("symphony_issues_total", {}, issues.length);
+    incCounter("symphony_plan_runs_total", {}, planRuns.length);
+    for (const state of ["todo", "in_progress", "in_review", "done", "cancelled"]) {
+      const count = issues.filter((i) => i.state === state).length;
+      incCounter("symphony_issues_total", { state }, count);
+    }
+    for (const state of ["pending", "dry_running", "awaiting_approval", "running", "done", "failed", "cancelled"]) {
+      const count = planRuns.filter((r) => r.state === state).length;
+      incCounter("symphony_plan_runs_total", { state }, count);
+    }
+    const concurrency = options?.getConcurrencyStatus?.() ?? { limit: 0, available: 0, active: 0 };
+    incCounter("symphony_concurrency_limit", {}, concurrency.limit);
+    incCounter("symphony_concurrency_available", {}, concurrency.available);
+    incCounter("symphony_concurrency_active", {}, concurrency.active);
+    return c.text(renderMetrics(), 200, { "Content-Type": "text/plain; version=0.0.4" });
+  });
+
+  app.get("/metrics/summary", (c) => c.json(tracker.getMetricsSummary()));
+
+  app.get("/metrics/export", (c) => {
+    const format = c.req.query("format") ?? "json";
+    const metrics = tracker.listIssueMetrics();
+    if (format === "csv") {
+      const headers: (keyof IssueMetrics)[] = [
+        "issue_uuid", "final_state", "attempts", "sessions", "cost_usd",
+        "input_tokens", "output_tokens", "duration_ms", "blocked", "recorded_at",
+      ];
+      const escapeCsv = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, "\"\"")}"` : v;
+      const rows = metrics.map((m) => headers.map((h) => escapeCsv(String(m[h]))).join(","));
+      const csv = [headers.join(","), ...rows].join("\n") + "\n";
+      return c.text(csv, 200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": "attachment; filename=\"symphony-metrics.csv\"",
+      });
+    }
+    if (format === "json") {
+      return c.json({ exported_at: Date.now(), count: metrics.length, metrics });
+    }
+    return c.json({ error: "Invalid format; use json or csv" }, 400);
+  });
+
+  app.get("/issues/:uuid/metrics", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const metrics = tracker.getIssueMetrics(uuid);
+    if (!metrics) return c.json({ error: "No metrics recorded yet" }, 404);
+    return c.json(metrics);
+  });
 
   app.get("/health", (c) => {
     const workflowLoaded = _getWorkflow() !== undefined;
@@ -112,6 +203,8 @@ export function createRoutes(
       if (Bun.which(bin)) available_agents.push(kind);
     }
 
+    const concurrency = options?.getConcurrencyStatus?.() ?? { limit: 0, available: 0, active: 0 };
+
     return c.json({
       status,
       orchestrator_running: true,
@@ -119,6 +212,9 @@ export function createRoutes(
       workflow_loaded: workflowLoaded,
       inflight_agents: inflightAgents,
       queue_depth: queueDepth,
+      concurrency_limit: concurrency.limit,
+      concurrency_available: concurrency.available,
+      concurrency_active: concurrency.active,
       uptime_ms: Date.now() - startedAt,
       available_agents,
     });
@@ -131,15 +227,15 @@ export function createRoutes(
   });
 
   app.get("/issues/:uuid", (c) => {
-    const issue = tracker.getIssue(c.req.param("uuid"));
+    const issue = tracker.resolveIssue(c.req.param("uuid"));
     if (!issue) return c.json({ error: "Not found" }, 404);
     return c.json(issue);
   });
 
   app.post("/issues", async (c) => {
     const body = await c.req.json();
-    if (typeof body === "object" && body !== null && ("id" in body || "identifier" in body || "uuid" in body)) {
-      return c.json({ error: "fields 'id', 'identifier', and 'uuid' are not accepted; server auto-generates TASK-N identifiers" }, 400);
+    if (typeof body === "object" && body !== null && ("id" in body || "uuid" in body)) {
+      return c.json({ error: "fields 'id' and 'uuid' are not accepted; server auto-generates uuid and defaults identifier to TASK-N" }, 400);
     }
     const parsed = IssueCreateSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
@@ -285,6 +381,28 @@ export function createRoutes(
     try { return c.json({ content: await fs.readFile(config.WORKFLOW_PATH, "utf-8") }); } catch { return c.json({ content: "" }); }
   });
 
+  app.post("/workflow/validate", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { content?: string };
+    if (typeof body.content !== "string") {
+      return c.json({ ok: false, error: "content must be a string" }, 400);
+    }
+    try {
+      // Write to a temp file so loadWorkflow can parse the front matter + template.
+      const tmpPath = path.join(process.cwd(), ".symphony", `workflow-validate-${Date.now()}.md`);
+      await fs.mkdir(path.dirname(tmpPath), { recursive: true });
+      await fs.writeFile(tmpPath, body.content, "utf-8");
+      try {
+        loadWorkflow(tmpPath);
+        return c.json({ ok: true });
+      } finally {
+        await fs.unlink(tmpPath).catch(() => {});
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: message }, 400);
+    }
+  });
+
   app.put("/workflow", async (c) => {
     const { content } = await c.req.json() as { content: string };
     await fs.writeFile(config.WORKFLOW_PATH, content, "utf-8");
@@ -420,6 +538,52 @@ export function createRoutes(
     return c.json({ ...planEvent, payload: JSON.parse(planEvent.payload_json ?? "{}") });
   });
 
+  app.get("/issues/:uuid/plan-history", (c) => {
+    const events = tracker.getEventsByKind(c.req.param("uuid"), "plan_submitted");
+    const history = events.map((e) => {
+      const payload = JSON.parse(e.payload_json ?? "{}") as PlanPayload;
+      return {
+        revision: payload.revision,
+        ts: e.ts,
+        markdown: payload.markdown,
+        steps: payload.steps,
+        estimates: payload.estimates,
+      };
+    });
+    return c.json({ history });
+  });
+
+  app.get("/issues/:uuid/plan-diff", (c) => {
+    const fromRevision = Number(c.req.query("from"));
+    const toRevision = Number(c.req.query("to"));
+    if (!Number.isFinite(fromRevision) || !Number.isFinite(toRevision)) {
+      return c.json({ error: "from and to revisions are required" }, 400);
+    }
+    const events = tracker.getEventsByKind(c.req.param("uuid"), "plan_submitted");
+    const fromEvent = events.find((e) => {
+      const payload = JSON.parse(e.payload_json ?? "{}") as PlanPayload;
+      return payload.revision === fromRevision;
+    });
+    const toEvent = events.find((e) => {
+      const payload = JSON.parse(e.payload_json ?? "{}") as PlanPayload;
+      return payload.revision === toRevision;
+    });
+    if (!fromEvent || !toEvent) {
+      return c.json({ error: "One or both revisions not found" }, 404);
+    }
+    const fromPayload = JSON.parse(fromEvent.payload_json ?? "{}") as PlanPayload;
+    const toPayload = JSON.parse(toEvent.payload_json ?? "{}") as PlanPayload;
+    return c.json(computePlanDiff(fromPayload, toPayload));
+  });
+
+  app.get("/issues/:uuid/plan-graph", (c) => {
+    const planEvent = tracker.getLatestEventByKind(c.req.param("uuid"), "plan_submitted");
+    if (!planEvent) return c.json({ error: "No plan submitted yet" }, 404);
+    const payload = JSON.parse(planEvent.payload_json ?? "{}") as PlanPayload;
+    const graph = computePlanGraph(payload.steps);
+    return c.json(graph);
+  });
+
   app.post("/issues/:uuid/approve", async (c) => {
     const uuid = c.req.param("uuid");
     const body = (await c.req.json().catch(() => ({}))) as { note?: string };
@@ -451,10 +615,26 @@ export function createRoutes(
     return c.json({ ok: true, state: result.state });
   });
 
+  const PlanActualsSchema = z.object({
+    actual_turns: z.number().int().min(0).optional(),
+    actual_files_touched: z.number().int().min(0).optional(),
+    actual_complexity: z.enum(["low", "medium", "high"]).optional(),
+  }).strict();
+
+  app.post("/issues/:uuid/actuals", async (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const parsed = PlanActualsSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, 400);
+    tracker.updateIssuePlanActuals(uuid, parsed.data);
+    return c.json({ ok: true });
+  });
+
   app.post("/issues/:uuid/revise-plan", async (c) => {
     const parsed = RequestChangesSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, 400);
-    const result = revisePlan(c.req.param("uuid"), parsed.data.note);
+    const result = revisePlan(c.req.param("uuid"), parsed.data.note, parsed.data.feedback);
     if (!result.ok) {
       return c.json({ error: result.error }, result.error === "Not found" ? 404 : 400);
     }
@@ -555,6 +735,37 @@ export function createRoutes(
     return c.json({ ok: true, deleted });
   });
 
+  // --- Blockers ---
+
+  const BlockerCreateSchema = z.object({
+    blocker_uuid: z.string().uuid(),
+  }).strict();
+
+  app.post("/issues/:uuid/blockers", async (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const parsed = BlockerCreateSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: parsed.error.message }, 400);
+    const blocker = tracker.getIssue(parsed.data.blocker_uuid);
+    if (!blocker) return c.json({ error: "Blocker issue not found" }, 404);
+    if (blocker.uuid === uuid) return c.json({ error: "An issue cannot block itself" }, 400);
+    tracker.insertBlocker(uuid, blocker.uuid, blocker.state);
+    tracker.recordEvent(uuid, "blocker_added", `Blocked by ${blocker.identifier} (${blocker.uuid})`, { blocker_uuid: blocker.uuid, blocker_state: blocker.state });
+    return c.json({ ok: true });
+  });
+
+  app.delete("/issues/:uuid/blockers/:blockerUuid", (c) => {
+    const uuid = c.req.param("uuid");
+    const blockerUuid = c.req.param("blockerUuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    tracker.removeBlocker(uuid, blockerUuid);
+    tracker.recordEvent(uuid, "blocker_removed", `Blocker ${blockerUuid} removed`, { blocker_uuid: blockerUuid });
+    triggerTick();
+    return c.json({ ok: true });
+  });
+
   // --- Retrigger ---
 
   const RetriggerSchema = z.object({
@@ -633,6 +844,31 @@ export function createRoutes(
     // Omit content from list response to keep payload small
     const items = artifacts.map(({ content, storage_path, ...rest }) => rest);
     return c.json(items);
+  });
+
+  app.get("/issues/:uuid/related-artifacts", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+
+    const related = new Set<string>();
+    if (issue.plan_run_id) {
+      for (const i of tracker.listIssuesByPlanRun(issue.plan_run_id)) {
+        if (i.uuid !== uuid) related.add(i.uuid);
+      }
+      const run = tracker.getPlanRun(issue.plan_run_id);
+      if (run?.caller_issue_uuid && run.caller_issue_uuid !== uuid) related.add(run.caller_issue_uuid);
+    }
+    for (const b of issue.blockers) related.add(b.blocker_uuid);
+    for (const run of tracker.listPlanRuns()) {
+      if (run.caller_issue_uuid === uuid) {
+        for (const i of tracker.listIssuesByPlanRun(run.id)) related.add(i.uuid);
+      }
+    }
+
+    const artifacts = tracker.listArtifactsByIssues([...related]);
+    const items = artifacts.map(({ content, storage_path, ...rest }) => rest);
+    return c.json({ related_issue_uuids: [...related], artifacts: items });
   });
 
   app.get("/artifacts/:id", (c) => {
@@ -763,6 +999,74 @@ export function createRoutes(
     const run = tracker.getPlanRun(c.req.param("id"));
     if (!run) return c.json({ error: "Not found" }, 404);
     return c.json(run);
+  });
+
+  app.get("/plan-runs/:id/journal", (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    const entries = tracker.getPlanRunJournal(id);
+    return c.json({ id, entries });
+  });
+
+  app.get("/plan-runs/:id/nodes", (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+    const nodes = tracker.listPlanRunNodes(id);
+    return c.json({ id, nodes });
+  });
+
+  app.get("/issues/:uuid/llm-calls", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const calls = tracker.listLlmCalls(uuid);
+    return c.json({ issue_uuid: uuid, calls });
+  });
+
+  app.get("/issues/:uuid/llm-calls/summary", (c) => {
+    const uuid = c.req.param("uuid");
+    const issue = tracker.getIssue(uuid);
+    if (!issue) return c.json({ error: "Not found" }, 404);
+    const summary = tracker.getLlmCallSummary(uuid);
+    return c.json({ issue_uuid: uuid, ...summary });
+  });
+
+  app.get("/issues/summary", (c) => {
+    const issues = tracker.listIssues();
+    const totalCost = issues.reduce((sum, issue) => {
+      if (!issue.plan_estimates_json) return sum;
+      return sum;
+    }, 0);
+    // Aggregate LLM calls across all issues via a single query would be faster,
+    // but for correctness and small scale we sum per-issue summaries.
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCallCost = 0;
+    let totalCalls = 0;
+    for (const issue of issues) {
+      const s = tracker.getLlmCallSummary(issue.uuid);
+      totalInputTokens += s.input_tokens;
+      totalOutputTokens += s.output_tokens;
+      totalCallCost += s.cost_usd;
+      totalCalls += s.call_count;
+    }
+    const stateCounts = Object.fromEntries(
+      ["backlog", "todo", "planning", "plan_review", "in_progress", "in_review", "done", "cancelled", "blocked"].map((state) => [
+        state,
+        issues.filter((i) => i.state === state).length,
+      ])
+    );
+    return c.json({
+      total_issues: issues.length,
+      total_cost_usd: totalCallCost,
+      total_input_tokens: totalInputTokens,
+      total_output_tokens: totalOutputTokens,
+      total_tokens: totalInputTokens + totalOutputTokens,
+      total_llm_calls: totalCalls,
+      state_counts: stateCounts,
+    });
   });
 
   app.get("/plan-runs/:id/result", async (c) => {

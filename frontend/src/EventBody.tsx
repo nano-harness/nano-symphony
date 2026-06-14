@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, Show, For } from "solid-js";
 import { SolidMarkdown } from "solid-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -47,6 +47,11 @@ export function EventBody(props: EventBodyProps) {
   const [showRaw, setShowRaw] = createSignal(false);
 
   const markdownText = () => extractMarkdownText(props.payload);
+  const feedback = () => {
+    if (props.kind !== "plan_revision_requested" || typeof props.payload !== "object" || props.payload === null) return null;
+    const p = props.payload as Record<string, unknown>;
+    return p.feedback as { category: string; severity: string; must_fix?: string[] } | undefined | null;
+  };
   const jsonText = () => {
     if (props.payload === null || props.payload === undefined) return null;
     try {
@@ -65,6 +70,22 @@ export function EventBody(props: EventBodyProps) {
 
   return (
     <div class="event-body">
+      <Show when={feedback()}>
+        <div class="plan-feedback-badges">
+          <span class={`pill feedback-category ${feedback()!.category}`}>{feedback()!.category}</span>
+          <span class={`pill feedback-severity ${feedback()!.severity}`}>{feedback()!.severity}</span>
+          <Show when={feedback()!.must_fix && feedback()!.must_fix.length > 0}>
+            <div class="plan-feedback-must-fix">
+              <span style="font-size: 11px; color: var(--mute);">Must fix:</span>
+              <ul>
+                <For each={feedback()!.must_fix}>
+                  {(item) => <li>{item}</li>}
+                </For>
+              </ul>
+            </div>
+          </Show>
+        </div>
+      </Show>
       <Show when={markdownText() && !showRaw()}>
         <Show when={shouldShowContent()} fallback={
           <div class="event-body-collapsed">

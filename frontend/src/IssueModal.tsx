@@ -23,11 +23,14 @@ export function IssueModal(props: IssueModalProps) {
   const [labels, setLabels] = createSignal((props.issue?.labels || []).join(", "));
   const [workspacePath, setWorkspacePath] = createSignal(props.issue?.workspace_path || "");
   const [agentKind, setAgentKind] = createSignal<string>(props.issue?.agent_kind ?? "");
+  const [agentRole, setAgentRole] = createSignal<string>(props.issue?.agent_role ?? "");
   const [requirePlan, setRequirePlan] = createSignal<string>(
     props.issue?.require_plan === true ? "true"
       : props.issue?.require_plan === false ? "false"
       : ""
   );
+  const [costBudget, setCostBudget] = createSignal(props.issue?.cost_budget_usd?.toString() ?? "");
+  const [tokenBudget, setTokenBudget] = createSignal(props.issue?.token_budget?.toString() ?? "");
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [touched, setTouched] = createSignal({ title: false });
@@ -56,7 +59,10 @@ export function IssueModal(props: IssueModalProps) {
         state: state(),
         workspace_path: workspacePath().trim() || undefined,
         agent_kind: agentKind() === "" ? null : (agentKind() as "nano" | "claude-code"),
+        agent_role: agentRole().trim() || undefined,
         require_plan: requirePlan() === "" ? null : requirePlan() === "true",
+        cost_budget_usd: costBudget().trim() === "" ? null : Number(costBudget()),
+        token_budget: tokenBudget().trim() === "" ? null : Number(tokenBudget()),
         labels: labels()
           .split(",")
           .map((l) => l.trim())
@@ -208,6 +214,57 @@ export function IssueModal(props: IssueModalProps) {
                   <option value="true">Require plan</option>
                   <option value="false">Skip planning</option>
                 </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label" for="cost_budget">
+                  Cost budget (USD)
+                </label>
+                <input
+                  id="cost_budget"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  class="form-input"
+                  value={costBudget()}
+                  onInput={(e) => setCostBudget(e.currentTarget.value)}
+                  placeholder="No limit"
+                />
+              </div>
+
+              <div class="form-field">
+                <label class="form-label" for="token_budget">
+                  Token budget
+                </label>
+                <input
+                  id="token_budget"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="form-input"
+                  value={tokenBudget()}
+                  onInput={(e) => setTokenBudget(e.currentTarget.value)}
+                  placeholder="No limit"
+                />
+              </div>
+            </div>
+
+            <div class="form-field">
+              <label class="form-label" for="agent_role">
+                Agent role
+              </label>
+              <input
+                id="agent_role"
+                type="text"
+                class="form-input"
+                value={agentRole()}
+                onInput={(e) => setAgentRole(e.currentTarget.value)}
+                placeholder="e.g. planner, executor, reviewer"
+              />
+              <div class="form-hint">
+                Selects a profile from workflow.agent.roles. Falls back to the default agent config.
               </div>
             </div>
 

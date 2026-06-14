@@ -57,6 +57,29 @@ describe("resolveAgent", () => {
     expect(result.kind).toBe("nano");
     expect(result.binary).toBe("/custom/binary");
   });
+
+  it("role profile overrides defaults but not issue overrides", () => {
+    const result = resolveAgent(
+      { kind: "nano" },
+      { kind: "claude-code", timeoutMs: 60_000, maxRetries: 5 },
+      { kind: "claude-code", binary: "/role/claude", timeoutMs: 120_000, maxRetries: 1 },
+    );
+    expect(result.kind).toBe("nano");
+    expect(result.binary).toBe("nano");
+    expect(result.timeoutMs).toBe(120_000);
+    expect(result.maxRetries).toBe(1);
+  });
+
+  it("role profile is used when no issue override", () => {
+    const result = resolveAgent(
+      null,
+      { kind: "claude-code" },
+      { kind: "nano", timeoutMs: 120_000 },
+    );
+    expect(result.kind).toBe("nano");
+    expect(result.binary).toBe("nano");
+    expect(result.timeoutMs).toBe(120_000);
+  });
 });
 
 describe("AGENT_KIND_BINARY_DEFAULTS", () => {

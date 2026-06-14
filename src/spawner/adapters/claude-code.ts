@@ -90,7 +90,7 @@ export const claudeCodeAdapter: AgentAdapter = {
       "--append-system-prompt-file", path.join(ctx.workspace, ".claude", "append-system-prompt.md"),
       "--mcp-config", path.join(ctx.workspace, ".mcp.json"),
       "--permission-mode", ctx.config.permission_mode ?? "auto",
-      "--allowedTools", "mcp__symphony__*",
+      "--allowedTools", "symphony.*",
       ...(ctx.config.permissions?.allow ?? []).flatMap(r => ["--allowedTools", r]),
       ...(ctx.config.permissions?.deny ?? []).flatMap(r => ["--disallowedTools", r]),
       ...(ctx.config.sandbox?.extra_writable_paths ?? []).flatMap(p => ["--add-dir", p]),

@@ -86,7 +86,7 @@ async function main() {
   // eligible for orchestrator ticks immediately.
   await resumeRunningPlans(tracker, logger);
 
-  const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick(), { reloadWorkflow, apiToken });
+  const app = createHttpServer(tracker, getWorkflow, () => orchestrator.kick(), { reloadWorkflow, apiToken, getConcurrencyStatus: () => orchestrator.getConcurrencyStatus() });
   const server = Bun.serve({
     port: config.PORT,
     hostname: config.HOST,

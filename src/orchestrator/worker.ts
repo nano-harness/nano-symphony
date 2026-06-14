@@ -8,8 +8,10 @@ import type { SpawnResult } from "../spawner/index.ts";
 import { calculateBackoff } from "./backoff.ts";
 import { appendRunLog } from "./run_log.ts";
 import type { Logger } from "pino";
-import { resolveAgent } from "../agent-resolution.ts";
+import { resolveAgent, type AgentRoleProfile } from "../agent-resolution.ts";
 import type { AgentResultSummary } from "../spawner/agent-result-payload.ts";
+import { incCounter, observeHistogram } from "../metrics.ts";
+import { config } from "../config.ts";
 
 export interface WorkerContext {
   tracker: Tracker;
@@ -43,6 +45,20 @@ function normalizeBlockerString(reason?: string): string {
 
   // Truncate to 80 chars
   return normalized.slice(0, 80);
+}
+
+/**
+ * Pick a role profile from workflow.agent.roles when the issue has no explicit
+ * agent_role but carries a label that matches a defined role key. This lets
+ * operators route work to specialized agents (e.g. `reviewer`, `security`,
+ * `docs`) by simply tagging issues.
+ */
+export function resolveRoleFromLabels(labels: string[], roles?: Record<string, AgentRoleProfile>): string | undefined {
+  if (!roles) return undefined;
+  for (const label of labels) {
+    if (roles[label]) return label;
+  }
+  return undefined;
 }
 
 /**
@@ -275,16 +291,25 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
     return;
   }
 
-  // Resolve agent config before token TTL calculation
+  // Resolve agent config before token TTL calculation.
+  // Role-specific profiles override the top-level agent config.
   const agentConfig = workflow.workflow.agent;
+  const effectiveRole = issue.agent_role ?? resolveRoleFromLabels(issue.labels, agentConfig?.roles);
+  if (!issue.agent_role && effectiveRole) {
+    // Persist auto-assigned role so the UI and downstream runs stay consistent.
+    tracker.updateIssue(issue.uuid, { title: issue.title, state: issue.state, agent_role: effectiveRole });
+  }
+  const roleProfile = effectiveRole ? agentConfig?.roles?.[effectiveRole] : undefined;
   const resolved = resolveAgent(
     { kind: issue.agent_kind ?? undefined, binary: issue.agent_binary ?? undefined },
-    { kind: agentConfig?.kind, binary: agentConfig?.binary, timeoutMs: agentConfig?.timeout_ms, maxRetries: agentConfig?.max_retries }
+    { kind: agentConfig?.kind, binary: agentConfig?.binary, timeoutMs: agentConfig?.timeout_ms, maxRetries: agentConfig?.max_retries },
+    roleProfile,
   );
   const agentKind = resolved.kind;
   const binary = resolved.binary;
   const baseTimeoutMs = resolved.timeoutMs;
   const maxRetries = resolved.maxRetries;
+  const effectiveRoleProfile = resolved.roleProfile;
 
   // S6: Issue agent token scoped to reporting-only tools (AGENT_TOOL_SCOPE).
   // S7: Extend TTL to cover the full agent timeout plus a 10-minute buffer so
@@ -305,12 +330,15 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
     attempt,
     agent_kind: agentKind,
     agent_binary: binary,
+    agent_role: effectiveRole ?? issue.agent_role ?? null,
     agent_overridden: issue.agent_kind != null,
+    agent_role_auto_assigned: !issue.agent_role && !!effectiveRole,
   });
 
   let spawnResult: SpawnResult | null = null;
   let accTokenInput = 0;
   let accTokenOutput = 0;
+  let resultPayload: AgentResultSummary | null = null;
   try {
     spawnResult = await spawn({
       issueUuid,
@@ -322,13 +350,16 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
       binary,
       timeoutMs: baseTimeoutMs,
       agentKind,
-      extraEnv: agentConfig?.extra_env,
+      extraEnv: {
+        ...agentConfig?.extra_env,
+        ...effectiveRoleProfile?.extra_env,
+      },
       agentConfig: {
-        permission_mode: agentConfig?.permission_mode,
-        permissions: agentConfig?.permissions,
-        sandbox: agentConfig?.sandbox,
-        trusted_binaries: agentConfig?.trusted_binaries,
-        hooks: agentConfig?.hooks,
+        permission_mode: effectiveRoleProfile?.permission_mode ?? agentConfig?.permission_mode,
+        permissions: effectiveRoleProfile?.permissions ?? agentConfig?.permissions,
+        sandbox: effectiveRoleProfile?.sandbox ?? agentConfig?.sandbox,
+        trusted_binaries: effectiveRoleProfile?.trusted_binaries ?? agentConfig?.trusted_binaries,
+        hooks: effectiveRoleProfile?.hooks ?? agentConfig?.hooks,
       },
       logger,
       onStreamEvent: (ev) => {
@@ -347,6 +378,11 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
       onPidAssigned: (pid) => {
         tracker.updateAgentPid(issueUuid, pid);
       },
+      // Heartbeat: process-level liveness updates so the orchestrator can detect
+      // dead agents without waiting for the full agent timeout.
+      onHeartbeat: (ts) => {
+        tracker.updateHeartbeat(issueUuid, ts);
+      },
     });
   } catch (err) {
     logger.error({ err, issueUuid }, "Agent spawn error");
@@ -356,7 +392,17 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
     tracker.updateAgentPid(issueUuid, null);
   }
 
-  const resultPayload: AgentResultSummary | null = spawnResult?.agentResult ?? null;
+  resultPayload = spawnResult?.agentResult ?? null;
+
+  // Contract validation: if the adapter produced a result, enforce stricter rules.
+  if (resultPayload) {
+    const validated = (await import("../contract/validate.ts")).validateAgentResultSummary(resultPayload);
+    if (!validated.ok) {
+      logger.warn({ issueUuid, errors: validated.errors }, "Agent result violates contract");
+      tracker.recordEvent(issueUuid, "contract_violation", `Result violates contract: ${validated.errors.join("; ")}`, { errors: validated.errors, attempt });
+      resultPayload = null;
+    }
+  }
 
   const patch = spawnResult?.artifacts?.patch ?? null;
   if (patch) {
@@ -603,7 +649,55 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
 	  }
   });
 
+  // Circuit breaker: after repeated needs_retry, block the issue regardless of fingerprint.
+  if (semantics === "needs_retry") {
+    const breakerState = checkCircuitBreaker(tracker, issueUuid, config.CIRCUIT_BREAKER_FAILURE_THRESHOLD);
+    if (breakerState) {
+      finalSemantics = "abandoned";
+      finalTargetState = breakerState;
+      semantics = "abandoned";
+    }
+  }
+
   revokeToken(token);
+
+  // Record per-attempt LLM usage for observability.
+  // For adapters that don't expose per-call metrics, this captures the whole attempt.
+  if (spawnResult) {
+    const costUsd = resultPayload && "cost_usd" in resultPayload ? Number(resultPayload.cost_usd) : undefined;
+    const durationApiMs = resultPayload && "duration_api_ms" in resultPayload ? Number(resultPayload.duration_api_ms) : undefined;
+    const { provider, model } = inferLlmProviderAndModel(agentKind);
+    tracker.recordLlmCall({
+      issue_uuid: issueUuid,
+      attempt,
+      provider,
+      model,
+      input_tokens: finalTokens?.input ?? 0,
+      output_tokens: finalTokens?.output ?? 0,
+      cost_usd: Number.isFinite(costUsd ?? NaN) ? (costUsd ?? null) : null,
+      duration_ms: spawnResult.duration_ms,
+      duration_api_ms: Number.isFinite(durationApiMs ?? NaN) ? (durationApiMs ?? null) : null,
+    });
+
+    incCounter("symphony_agent_attempts_total", { agent_kind: agentKind, provider, model, semantics });
+    incCounter("symphony_tokens_total", { agent_kind: agentKind, kind: "input" }, finalTokens?.input ?? 0);
+    incCounter("symphony_tokens_total", { agent_kind: agentKind, kind: "output" }, finalTokens?.output ?? 0);
+    observeHistogram("symphony_agent_duration_seconds", spawnResult.duration_ms);
+
+    // Enforce per-issue cost/token budgets after recording usage.
+    enforceBudgetIfNeeded(ctx.tracker, issueUuid);
+  }
+
+  // Persist a terminal snapshot of issue metrics for durable reporting/export.
+  const issueAfter = tracker.getIssue(issueUuid);
+  if (issueAfter && ["done", "cancelled", "blocked"].includes(issueAfter.state)) {
+    tracker.recordIssueMetrics(issueUuid, {
+      getIssue: tracker.getIssue,
+      getRun: tracker.getRun,
+      getEventsByKind: tracker.getEventsByKind,
+      getLlmCallSummary: tracker.getLlmCallSummary,
+    });
+  }
 
   logger.info({ issueUuid, semantics, attempt, agent_kind: agentKind }, "Worker completed");
   } finally {
@@ -641,4 +735,76 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
       });
     }
   }
+}
+
+function checkCircuitBreaker(tracker: Tracker, issueUuid: string, threshold: number): string | null {
+  if (threshold <= 0) return null;
+  const events = tracker.getEventsByKind(issueUuid, "session_completed");
+  let consecutiveFailures = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const payload = JSON.parse(events[i].payload_json ?? "{}") as { semantics?: string };
+    if (payload.semantics === "needs_retry") {
+      consecutiveFailures++;
+    } else {
+      break;
+    }
+  }
+  if (consecutiveFailures >= threshold) {
+    const issue = tracker.getIssue(issueUuid);
+    if (!issue || issue.state === "blocked") return null;
+    tracker.updateIssueState(issueUuid, "blocked");
+    tracker.updateLastIssueState(issueUuid, "blocked");
+    tracker.releaseIssue(issueUuid, "released");
+    tracker.recordEvent(issueUuid, "circuit_breaker_opened",
+      `Circuit breaker opened after ${consecutiveFailures} consecutive failures`,
+      { consecutive_failures: consecutiveFailures, threshold });
+    return "blocked";
+  }
+  return null;
+}
+
+export function enforceBudgetIfNeeded(tracker: Tracker, issueUuid: string): void {
+  const issue = tracker.getIssue(issueUuid);
+  if (!issue) return;
+  if (issue.state === "done" || issue.state === "cancelled") return;
+  if (issue.cost_budget_usd == null && issue.token_budget == null) return;
+
+  const summary = tracker.getLlmCallSummary(issueUuid);
+  let exceeded = false;
+  let reason = "";
+
+  if (issue.cost_budget_usd != null && summary.cost_usd > issue.cost_budget_usd) {
+    exceeded = true;
+    reason = `Cost $${summary.cost_usd.toFixed(4)} exceeds budget $${issue.cost_budget_usd.toFixed(4)}`;
+  }
+  if (!exceeded && issue.token_budget != null && summary.input_tokens + summary.output_tokens > issue.token_budget) {
+    exceeded = true;
+    reason = `Tokens ${summary.input_tokens + summary.output_tokens} exceed budget ${issue.token_budget}`;
+  }
+
+  if (exceeded) {
+    tracker.updateIssueState(issueUuid, "cancelled");
+    tracker.updateLastIssueState(issueUuid, "cancelled");
+    tracker.recordEvent(issueUuid, "budget_exceeded", reason, {
+      cost_usd: summary.cost_usd,
+      input_tokens: summary.input_tokens,
+      output_tokens: summary.output_tokens,
+      cost_budget_usd: issue.cost_budget_usd,
+      token_budget: issue.token_budget,
+      reason,
+    });
+  }
+}
+
+function inferLlmProviderAndModel(agentKind: string): { provider: string; model: string } {
+  // Best-effort inference from environment. symphony itself is agnostic to the
+  // underlying LLM; the adapter just runs a binary. We surface what we can.
+  const model = process.env.NANO_MODEL?.trim() || process.env.CLAUDE_MODEL?.trim() || "unknown";
+  if (agentKind === "claude-code") return { provider: "claude-code", model };
+  const baseUrl = process.env.NANO_BASE_URL?.toLowerCase() ?? "";
+  if (baseUrl.includes("deepseek")) return { provider: "deepseek", model };
+  if (baseUrl.includes("openai")) return { provider: "openai", model };
+  if (baseUrl.includes("anthropic")) return { provider: "anthropic", model };
+  if (baseUrl.includes("ollama")) return { provider: "ollama", model };
+  return { provider: agentKind || "unknown", model };
 }

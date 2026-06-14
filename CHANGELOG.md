@@ -74,6 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SKILL**: SKILL.md documents `blocker_fingerprint` usage and sandbox defaults.
 
 ### Fixed
+- **Spawner (claude-code)**: `--allowedTools` pattern corrected from `mcp__symphony__*` to `symphony.*` so Claude Code can discover and call Symphony MCP tools (`symphony.fetch_issue`, `symphony.emit_result`, `symphony.session_completed`, etc.) directly instead of falling back to Bash/curl.
+- **Orchestrator**: Freshly-claimed runs now seed `heartbeat_at` immediately, preventing false-positive stale detection before the first process-level heartbeat fires (nano 30s / claude-code 60s).
+- **HTTP API**: `POST /issues` and `PUT /issues/:uuid` now accept `agent_binary`, completing the per-issue agent binary override chain from API → tracker → worker → spawner.
 - **Spawner**: Agent result summary schema changed from `.strict()` to `.passthrough()` — previously `.strict()` rejected agent diagnostic fields (`termination_cause`, `cache_key`, etc.) causing valid runs to be misclassified as `no_result_payload`/`abandoned`.
 - **Orchestrator**: Same blocker fingerprint ≥ 2 times auto-short-circuits to `blocked` state, avoiding wasted `max_retries` runs (LLM token savings ~50%).
 - **Orchestrator**: Agent silent termination now synthesizes `session_completed_synthetic` event with structured `blocker_fingerprint` and `termination_cause`, preserving failure reasons when LLM doesn't call MCP.

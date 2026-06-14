@@ -25,6 +25,7 @@ export function createHttpServer(
   options?: {
     reloadWorkflow?: () => { workflow: Workflow; template: string } | null;
     apiToken?: string;
+    getConcurrencyStatus?: () => { limit: number; available: number; active: number };
   },
 ): Hono {
   // S1: Always enforce control-plane auth. If no token is provided, auto-generate

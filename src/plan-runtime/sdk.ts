@@ -13,8 +13,20 @@ export interface IssueOpts {
   agent_kind?: "nano" | "claude-code";
   /** Agent binary override */
   binary?: string;
+  /** Agent role override (selects a profile from workflow.agent.roles) */
+  role?: string;
   /** Override prompt (default: first arg to issue()) */
   prompt?: string;
+  /**
+   * Stable identity for crash-resume. If omitted, a deterministic key is derived
+   * from the current phase and call index.
+   */
+  key?: string;
+  /**
+   * Human approval gate: the sub-issue is created in plan_review state and the
+   * plan run pauses until an operator transitions it out of plan_review.
+   */
+  gate?: boolean;
 }
 
 /** A read-only view of a stored artifact exposed to plan scripts. */
@@ -49,8 +61,12 @@ export interface DagNode {
   id: string;
   /** Prompt passed to the sub-issue (supports {{nodeId}} interpolation) */
   prompt: string;
-  /** Optional overrides (schema, agent_kind, binary) */
+  /** Optional overrides (schema, agent_kind, binary, role, gate) */
   opts?: IssueOpts;
+  /** @deprecated Use opts.role instead. */
+  role?: string;
+  /** @deprecated Use opts.gate instead. */
+  gate?: boolean;
 }
 
 /** A directed edge in a DAG declared via dag(). */
@@ -118,6 +134,6 @@ export interface DryRunSummary {
   error?: string;
   phases: string[];
   estimated_issues: number;
-  issue_prompts: Array<{ phase: string; prompt_prefix: string; has_schema: boolean }>;
+  issue_prompts: Array<{ phase: string; prompt_prefix: string; has_schema: boolean; gated?: boolean }>;
   max_issues: number;
 }

@@ -183,26 +183,3 @@ describe("S2: Removed privileged API fields", () => {
   });
 });
 
-describe("S5: MCP SSE token query param rejected", () => {
-  test("GET /mcp/sse with valid ?token= query param returns 401", async () => {
-    const app = makeApp();
-    // Issue a valid MCP token
-    const validToken = issueToken("issue-1", 1);
-    // Query param should NOT be accepted (S5 fix)
-    const res = await app.request("/mcp/sse?token=" + encodeURIComponent(validToken), {
-      method: "GET",
-    });
-    expect(res.status).toBe(401);
-  });
-
-  test("GET /mcp/sse with valid X-Symphony-Token header succeeds", async () => {
-    const app = makeApp();
-    const validToken = issueToken("issue-2", 1);
-    const res = await app.request("/mcp/sse", {
-      method: "GET",
-      headers: { "X-Symphony-Token": validToken },
-    });
-    // Should be 200 (SSE stream), not 401
-    expect(res.status).not.toBe(401);
-  });
-});

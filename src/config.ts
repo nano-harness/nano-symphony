@@ -19,6 +19,7 @@ const ConfigSchema = z.object({
   AGENT_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1_000).default(30_000),
   AGENT_HEARTBEAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(120_000),
   AGENT_HEARTBEAT_STALE_ACTION: z.enum(["cancel_then_retry", "retry", "abandon"]).default("cancel_then_retry"),
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(3),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

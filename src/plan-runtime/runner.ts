@@ -63,6 +63,8 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
   let subIssuesFailed = 0;
   const maxRetries = input.maxRetries ?? 0;
   const startedAt = Date.now();
+  // Per-phase deterministic call index for stable resume keys.
+  const phaseCallIndex = new Map<string, number>();
 
   function makeResult(fields: Omit<RunnerResult, "lastPhase" | "lastLog" | "lastLogAt" | "subIssuesStarted" | "subIssuesDone" | "subIssuesFailed">): RunnerResult {
     return { ...fields, lastPhase: currentPhase, lastLog, lastLogAt, subIssuesStarted, subIssuesDone, subIssuesFailed };
@@ -74,7 +76,7 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
     }
   }
 
-  async function runIssue(prompt: string, opts?: IssueOpts): Promise<unknown> {
+  async function runIssue(prompt: string, opts?: IssueOpts, onCreated?: (uuid: string) => void): Promise<{ result: unknown; uuid: string; key: string }> {
     checkWallTime();
 
     const effectivePrompt = opts?.prompt ?? prompt;
@@ -86,8 +88,12 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
     }
     issueCount++;
 
-    const promptPrefix = effectivePrompt.slice(0, 80);
-    const key = issueKey(currentPhase ?? "default", promptPrefix);
+    // Stable resume identity: user-provided key, or deterministic phase+call index.
+    const phase = currentPhase ?? "default";
+    const callIndex = (phaseCallIndex.get(phase) ?? 0) + 1;
+    phaseCallIndex.set(phase, callIndex);
+    const identity = opts?.key ?? `${phase}:${callIndex}`;
+    const key = issueKey(input.runId, identity);
 
     // Crash-resume: if this issue was already completed in a prior run, return its stored result
     if (completedResults.has(key)) {
@@ -97,7 +103,7 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
         ts: Date.now(),
         payload: { msg: `Resuming: skipping already-completed issue (key=${key})` },
       });
-      return prior.result ?? null;
+      return { result: prior.result ?? null, uuid: String(prior.issue_uuid ?? ""), key };
     }
 
     // Retry loop: attempt this sub-issue up to (1 + maxRetries) times on transient cancel
@@ -106,26 +112,37 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
       // Create sub-issue
       const uuid = nanoid();
       subIssuesStarted++;
+      const now = Date.now();
 
       const created = input.tracker.insertIssue({
         uuid,
         title: `[Plan ${input.runId}] ${effectivePrompt.slice(0, 120)}`,
         description: effectivePrompt,
         priority: "medium",
-        state: "todo",
+        state: opts?.gate ? "plan_review" : "todo",
         labels: ["plan-sub-task"],
         agent_kind: opts?.agent_kind ?? null,
         agent_binary: opts?.binary ?? null,
+        agent_role: opts?.role ?? null,
         require_plan: null,
         plan_run_id: input.runId,
         expected_schema: opts?.schema ? JSON.stringify(opts.schema) : null,
         scratchpad: null,
       });
       const identifier = created.identifier;
+      onCreated?.(uuid);
+
+      input.tracker.upsertPlanRunNode({
+        run_id: input.runId,
+        node_key: key,
+        issue_uuid: uuid,
+        state: "running",
+        started_at: now,
+      });
 
       appendJournalEntry(input.runId, {
         type: "issue_start",
-        ts: Date.now(),
+        ts: now,
         payload: { key, issue_uuid: uuid, identifier, phase: currentPhase },
       });
 
@@ -138,22 +155,55 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
       while (true) {
         checkWallTime();
         if (Date.now() > deadline) {
-          throw new Error(`issue timeout: ${identifier} did not complete within the allowed time`);
+          const errMsg = `issue timeout: ${identifier} did not complete within the allowed time`;
+          input.tracker.upsertPlanRunNode({
+            run_id: input.runId,
+            node_key: key,
+            issue_uuid: uuid,
+            state: "failed",
+            started_at: now,
+            finished_at: Date.now(),
+            error: errMsg,
+          });
+          throw new Error(errMsg);
         }
 
         await new Promise(res => setTimeout(res, RUNNER_POLL_INTERVAL_MS));
 
         const issue = input.tracker.getIssue(uuid);
-        if (!issue) throw new Error(`Issue ${uuid} disappeared from tracker`);
+        if (!issue) {
+          const errMsg = `Issue ${uuid} disappeared from tracker`;
+          input.tracker.upsertPlanRunNode({
+            run_id: input.runId,
+            node_key: key,
+            issue_uuid: uuid,
+            state: "failed",
+            started_at: now,
+            finished_at: Date.now(),
+            error: errMsg,
+          });
+          throw new Error(errMsg);
+        }
 
         if (issue.state === "done" || issue.state === "cancelled") {
           // Get the latest emit_result
           const result = input.tracker.getLatestIssueResult(uuid);
           const resultData = result?.data ?? null;
+          const finishedAt = Date.now();
+
+          input.tracker.upsertPlanRunNode({
+            run_id: input.runId,
+            node_key: key,
+            issue_uuid: uuid,
+            state: issue.state,
+            started_at: now,
+            finished_at: finishedAt,
+            result: resultData,
+          });
 
           appendJournalEntry(input.runId, {
             type: "issue_done",
-            ts: Date.now(),
+            ts: finishedAt,
             payload: { key, issue_uuid: uuid, identifier, state: issue.state, has_result: !!result, result: resultData },
           });
 
@@ -165,6 +215,14 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
           issueResult = resultData;
           subIssuesDone++;
           break poll;
+        }
+
+        if (opts?.gate && issue.state === "plan_review") {
+          appendJournalEntry(input.runId, {
+            type: "log",
+            ts: Date.now(),
+            payload: { msg: `Gate: waiting for approval of ${identifier} (issue ${uuid})` },
+          });
         }
       }
 
@@ -191,10 +249,20 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
           continue;
         }
 
-        throw new Error(`Sub-issue ${identifier} was cancelled`);
+        const errMsg = `Sub-issue ${identifier} was cancelled`;
+        input.tracker.upsertPlanRunNode({
+          run_id: input.runId,
+          node_key: key,
+          issue_uuid: uuid,
+          state: "failed",
+          started_at: now,
+          finished_at: Date.now(),
+          error: errMsg,
+        });
+        throw new Error(errMsg);
       }
 
-      return issueResult;
+      return { result: issueResult, uuid, key };
     }
   }
 
@@ -276,6 +344,14 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
     });
 
     const results = new Map<string, unknown>();
+    // node id -> created issue uuid for this run
+    const nodeIssueUuid = new Map<string, string>();
+    // node id -> whether it acts as a reviewer/gate for downstream nodes
+    const nodeIsGate = new Map<string, boolean>();
+    // Precompute reverse adjacency: node -> direct predecessors
+    const predecessors = new Map<string, string[]>();
+    for (const n of nodes) predecessors.set(n.id, []);
+    for (const e of edges) predecessors.get(e.to)!.push(e.from);
 
     // --- Execute layer by layer ---
     try {
@@ -294,18 +370,42 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
             const val = results.get(trimmed);
             return typeof val === "string" ? val : JSON.stringify(val);
           });
-          return { id, prompt, opts: node.opts };
+          // DAG node id is the stable resume identity.
+          // Also merge legacy top-level role/gate into opts.
+          const opts: IssueOpts = {
+            ...node.opts,
+            key: id,
+            role: node.opts?.role ?? node.role,
+            gate: node.opts?.gate ?? node.gate,
+          };
+          return { id, prompt, opts };
         });
 
-        // Run all nodes in this layer in parallel
+        // Run all nodes in this layer in parallel.
+        // For each node, after creation, add blockers for any gate predecessors.
         const layerResults = await Promise.all(
           interpolated.map(({ id, prompt, opts }) =>
-            runIssue(prompt, opts).then((res) => ({ id, res }))
+            runIssue(prompt, opts, (uuid) => {
+              nodeIssueUuid.set(id, uuid);
+              const node = nodeMap.get(id)!;
+              nodeIsGate.set(id, (node.opts?.role ?? node.role) === "reviewer" || (node.opts?.gate ?? node.gate) === true);
+              for (const predId of predecessors.get(id) ?? []) {
+                if (!nodeIsGate.get(predId)) continue;
+                const blockerUuid = nodeIssueUuid.get(predId);
+                if (!blockerUuid) continue;
+                input.tracker.insertBlocker(uuid, blockerUuid, input.tracker.getIssue(blockerUuid)?.state ?? "todo");
+                appendJournalEntry(input.runId, {
+                  type: "log",
+                  ts: Date.now(),
+                  payload: { msg: `Reviewer/gate node "${predId}" blocks successor "${id}"` },
+                });
+              }
+            }).then((res) => ({ id, res }))
           )
         );
 
         for (const { id, res } of layerResults) {
-          results.set(id, res);
+          results.set(id, res.result);
         }
       }
     } catch (err) {
@@ -409,7 +509,7 @@ export async function runPlan(input: RunnerInput): Promise<RunnerResult> {
       spent: input.tokenSpent,
       remaining: () => input.tokenTotal > 0 ? Math.max(0, input.tokenTotal - input.tokenSpent()) : Infinity,
     },
-    issue: runIssue,
+    issue: (prompt: string, opts?: IssueOpts) => runIssue(prompt, opts).then(r => r.result),
     parallel: runParallel,
     pipeline: runPipeline,
     dag: runDag,

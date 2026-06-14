@@ -39,7 +39,8 @@ describe("nano adapter — renderWorkspaceFiles (B3)", () => {
     const files = nanoAdapter.renderWorkspaceFiles(makeCtx());
     const yaml = files.find(f => f.path === ".nano/nano.yaml");
     expect(yaml).toBeDefined();
-    expect(yaml!.contents).toBe("permission_mode: auto\n");
+    expect(yaml!.contents).toContain("permission_mode: auto");
+    expect(yaml!.contents).toContain("mcp_symphony_*");
   });
 
   test("writes .nano/nano.yaml with custom permission_mode", () => {

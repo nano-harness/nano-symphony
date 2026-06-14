@@ -43,6 +43,30 @@ export const WorkflowSchema = z.object({
     trusted_binaries: z.array(z.string()).optional(),
     hooks: z.record(z.unknown()).optional(),
     /**
+     * Role-specific agent profiles. Each role inherits from the top-level agent
+     * config and overrides selected fields. Issues with an agent_role are
+     * dispatched using the matching profile, falling back to the default agent.
+     */
+    roles: z.record(z.string(), z.object({
+      kind: z.enum(["nano", "claude-code"]).optional(),
+      binary: z.string().optional(),
+      timeout_ms: z.number().optional(),
+      max_retries: z.number().optional(),
+      extra_env: z.record(z.string()).optional(),
+      permission_mode: z.string().optional(),
+      permissions: z.object({
+        allow: z.array(z.string()).optional(),
+        deny: z.array(z.string()).optional(),
+        denial_max_consecutive: z.number().int().nonnegative().optional(),
+        denial_max_total: z.number().int().nonnegative().optional(),
+      }).optional(),
+      sandbox: z.object({
+        extra_writable_paths: z.array(z.string()).optional(),
+      }).passthrough().optional(),
+      trusted_binaries: z.array(z.string()).optional(),
+      hooks: z.record(z.unknown()).optional(),
+    }).passthrough()).optional(),
+    /**
      * @deprecated Planning mode has been replaced by plan-run (spawn_plan_run / spawn_plan_run_and_handoff).
      * This field is ignored and will be removed in a future version.
      */

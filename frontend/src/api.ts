@@ -1,10 +1,20 @@
 const BASE = "/api/v1";
-export interface Issue { id: number; uuid: string; identifier: string; title: string; description: string | null; priority: string; state: string; branch: string | null; url: string | null; workspace_path: string | null; agent_kind: "nano" | "claude-code" | null; require_plan: boolean | null; created_at: string; updated_at: string; labels: string[]; blockers: Array<{ blocker_uuid: string; blocker_state: string }>; }
+export interface Issue { id: number; uuid: string; identifier: string; title: string; description: string | null; priority: string; state: string; branch: string | null; url: string | null; workspace_path: string | null; agent_kind: "nano" | "claude-code" | null; agent_role: string | null; require_plan: boolean | null; plan_estimates_json: string | null; plan_actuals_json: string | null; plan_progress_json: string | null; cost_budget_usd: number | null; token_budget: number | null; cost_usd: number | null; token_total: number | null; created_at: string; updated_at: string; labels: string[]; blockers: Array<{ blocker_uuid: string; blocker_state: string }>; }
 export interface SymphonyRun { issue_uuid: string; next_attempt: number; current_attempt: number | null; last_state: string; workspace_path: string; workspace_managed: boolean; next_due_ts: number | null; last_event: string | null; last_event_ts: number | null; last_error: string | null; token_input: number; token_output: number; token_total: number; }
 export interface SymphonyEvent { id: string; issue_uuid: string; ts: number; kind: string; message: string; payload_json: string | null; }
 export interface Comment { id: string; issue_uuid: string; ts: number; author: string; body: string; metadata: unknown | null; }
 export interface Artifact { id: string; issue_uuid: string; attempt: number; source: "git_diff"; kind: string; label: string | null; path: string | null; content: string | null; metadata_json: string | null; content_size: number; mime_type: string; ts: number; }
 export interface PlanRun { id: string; caller_issue_uuid: string | null; script: string; meta: string; args: string | null; state: string; dry_run_summary: string | null; approval_status: string | null; approval_reason: string | null; approved_at: number | null; approved_by: string | null; result: string | null; wall_time_ms: number; started_at: number | null; created_at: number; finished_at: number | null; }
+export interface JournalEntry { type: "phase" | "issue_start" | "issue_done" | "issue_error" | "log" | "parallel_start" | "parallel_done" | "dag_start" | "dag_done" | "dag_error"; ts: number; payload: Record<string, unknown>; }
+export interface PlanRunNode { run_id: string; node_key: string; issue_uuid: string | null; state: string; started_at: number | null; finished_at: number | null; result_json: string | null; error: string | null; }
+export interface LlmCall { id: string; issue_uuid: string; attempt: number; provider: string | null; model: string | null; input_tokens: number; output_tokens: number; cost_usd: number | null; duration_ms: number | null; duration_api_ms: number | null; created_at: number; }
+export interface PlanStep { id: string; title: string; description?: string; }
+export interface PlanEstimates { files_touched?: number; complexity?: string; estimated_turns?: number; }
+export interface PlanHistoryEntry { revision: number; ts: number; markdown: string; steps?: PlanStep[]; estimates?: PlanEstimates; }
+export interface PlanDiff { from_revision: number; to_revision: number; markdown: { hunks: Array<{ oldStart: number; newStart: number; lines: Array<{ kind: "context" | "added" | "removed"; text: string }> }> }; steps: { added: PlanStep[]; removed: PlanStep[]; changed: Array<{ from: PlanStep; to: PlanStep; changedFields: string[] }> }; estimates: { added: Record<string, unknown>; removed: Record<string, unknown>; changed: Record<string, { from: unknown; to: unknown }> }; }
+export interface PlanGraphNode { id: string; title: string; description?: string; layer: number; }
+export interface PlanGraphEdge { from: string; to: string; }
+export interface PlanGraph { nodes: PlanGraphNode[]; edges: PlanGraphEdge[]; layers: string[][]; ok: boolean; error?: string; }
 
 /** S1: Read the token injected by the server into index.html at serve time. */
 function getApiToken(): string | undefined {
@@ -87,20 +97,34 @@ export const api = {
     catch { return null; }
   },
   async approvePlan(issueUuid: string, note?: string): Promise<{ ok: boolean; state: string }> { return request<{ ok: boolean; state: string }>(`${BASE}/issues/${issueUuid}/approve-plan`, jsonInit("POST", { note })); },
-  async revisePlan(issueUuid: string, note: string): Promise<{ ok: boolean; state: string }> { return request<{ ok: boolean; state: string }>(`${BASE}/issues/${issueUuid}/revise-plan`, jsonInit("POST", { note })); },
+  async setPlanActuals(issueUuid: string, actuals: { actual_turns?: number; actual_files_touched?: number; actual_complexity?: "low" | "medium" | "high" }): Promise<{ ok: boolean }> { return request<{ ok: boolean }>(`${BASE}/issues/${issueUuid}/actuals`, jsonInit("POST", actuals)); },
+  async revisePlan(issueUuid: string, note: string, feedback?: { category: "scope" | "approach" | "estimate" | "missing_tests" | "other"; severity: "minor" | "major" | "blocking"; must_fix?: string[] }): Promise<{ ok: boolean; state: string }> { return request<{ ok: boolean; state: string }>(`${BASE}/issues/${issueUuid}/revise-plan`, jsonInit("POST", { note, feedback })); },
+  async getPlanHistory(issueUuid: string): Promise<{ history: PlanHistoryEntry[] }> { return request<{ history: PlanHistoryEntry[] }>(`${BASE}/issues/${issueUuid}/plan-history`); },
+  async getPlanDiff(issueUuid: string, fromRevision: number, toRevision: number): Promise<PlanDiff> { return request<PlanDiff>(`${BASE}/issues/${issueUuid}/plan-diff?from=${fromRevision}&to=${toRevision}`); },
+  async getPlanGraph(issueUuid: string): Promise<PlanGraph> { return request<PlanGraph>(`${BASE}/issues/${issueUuid}/plan-graph`); },
   async revealWorkspace(issueUuid: string): Promise<{ ok: boolean; path: string }> { return request<{ ok: boolean; path: string }>(`${BASE}/issues/${issueUuid}/reveal-workspace`, jsonInit("POST")); },
   fileURL(issueUuid: string, relativePath: string): string { return withTokenParam(`${BASE}/workspaces/${issueUuid}/file?path=${encodeURIComponent(relativePath)}`); },
   async listComments(issueUuid: string): Promise<Comment[]> { return request<Comment[]>(`${BASE}/issues/${issueUuid}/comments`); },
   async addComment(issueUuid: string, body: string, author?: string): Promise<Comment> { return request<Comment>(`${BASE}/issues/${issueUuid}/comments`, jsonInit("POST", { body, author })); },
   async deleteComment(issueUuid: string, commentId: string): Promise<void> { await request<{ ok: boolean }>(`${BASE}/issues/${issueUuid}/comments/${commentId}`, { method: "DELETE" }); },
   async retrigger(issueUuid: string, opts?: { target_state?: string; note?: string }): Promise<void> { await request<{ ok: boolean }>(`${BASE}/issues/${issueUuid}/retrigger`, jsonInit("POST", opts ?? {})); },
+  async addBlocker(issueUuid: string, blockerUuid: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`${BASE}/issues/${issueUuid}/blockers`, jsonInit("POST", { blocker_uuid: blockerUuid }));
+  },
+  async removeBlocker(issueUuid: string, blockerUuid: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`${BASE}/issues/${issueUuid}/blockers/${blockerUuid}`, { method: "DELETE" });
+  },
   async listArtifacts(issueUuid: string, attempt?: number): Promise<Artifact[]> { const url = attempt !== undefined ? `${BASE}/issues/${issueUuid}/artifacts?attempt=${attempt}` : `${BASE}/issues/${issueUuid}/artifacts`; return request<Artifact[]>(url); },
+  async getRelatedArtifacts(issueUuid: string): Promise<{ related_issue_uuids: string[]; artifacts: Artifact[] }> { return request<{ related_issue_uuids: string[]; artifacts: Artifact[] }>(`${BASE}/issues/${issueUuid}/related-artifacts`); },
   async listRecentArtifacts(limit?: number): Promise<Artifact[]> { const url = limit ? `${BASE}/artifacts?limit=${limit}` : `${BASE}/artifacts`; return request<Artifact[]>(url); },
   async getArtifact(id: string): Promise<Artifact> { return request<Artifact>(`${BASE}/artifacts/${id}`); },
   artifactRawURL(id: string): string { return `${BASE}/artifacts/${id}/raw`; },
   async listPlanRuns(callerIssueUuid?: string): Promise<PlanRun[]> {
     const url = callerIssueUuid ? `${BASE}/plan-runs?caller_issue_uuid=${encodeURIComponent(callerIssueUuid)}` : `${BASE}/plan-runs`;
     return request<PlanRun[]>(url);
+  },
+  async createPlanRun(data: { script: string; meta: { name: string; max_issues: number; max_budget_tokens?: number; phases?: string[] }; args?: unknown; caller_issue_uuid?: string; wall_time_ms?: number }): Promise<{ id: string; state: string }> {
+    return request<{ id: string; state: string }>(`${BASE}/plan-runs`, jsonInit("POST", data));
   },
   async getPlanRun(id: string): Promise<PlanRun> { return request<PlanRun>(`${BASE}/plan-runs/${id}`); },
   async approvePlanRun(id: string): Promise<{ ok: boolean; state: string; approval_status: string }> {
@@ -111,5 +135,25 @@ export const api = {
   },
   async getPlanRunResult(id: string): Promise<{ id: string; state: string; result: string | null }> {
     return request<{ id: string; state: string; result: string | null }>(`${BASE}/plan-runs/${id}/result`);
+  },
+  async getPlanRunJournal(id: string): Promise<{ id: string; entries: JournalEntry[] }> {
+    return request<{ id: string; entries: JournalEntry[] }>(`${BASE}/plan-runs/${id}/journal`);
+  },
+  async getPlanRunNodes(id: string): Promise<{ id: string; nodes: PlanRunNode[] }> {
+    return request<{ id: string; nodes: PlanRunNode[] }>(`${BASE}/plan-runs/${id}/nodes`);
+  },
+  async getLlmCalls(issueUuid: string): Promise<{ issue_uuid: string; calls: LlmCall[] }> {
+    return request<{ issue_uuid: string; calls: LlmCall[] }>(`${BASE}/issues/${issueUuid}/llm-calls`);
+  },
+  async getLlmCallSummary(issueUuid: string): Promise<{ issue_uuid: string; input_tokens: number; output_tokens: number; cost_usd: number; duration_ms: number; call_count: number }> {
+    return request<{ issue_uuid: string; input_tokens: number; output_tokens: number; cost_usd: number; duration_ms: number; call_count: number }>(`${BASE}/issues/${issueUuid}/llm-calls/summary`);
+  },
+  async getGlobalSpendSummary(): Promise<{ total_issues: number; total_cost_usd: number; total_input_tokens: number; total_output_tokens: number; total_tokens: number; total_llm_calls: number; state_counts: Record<string, number> }> {
+    return request<{ total_issues: number; total_cost_usd: number; total_input_tokens: number; total_output_tokens: number; total_tokens: number; total_llm_calls: number; state_counts: Record<string, number> }>(`${BASE}/issues/summary`);
+  },
+  async exportMetrics(format: "json" | "csv"): Promise<Blob> {
+    const r = await fetch(`${BASE}/metrics/export?format=${format}`, { headers: authHeaders() });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return r.blob();
   },
 };

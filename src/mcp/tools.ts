@@ -63,6 +63,7 @@ const PlanStepSchema = z.object({
   id: z.string(),
   title: z.string(),
   description: z.string().optional(),
+  after: z.array(z.string()).optional(),
 }).passthrough();
 
 const PlanEstimatesSchema = z.object({
@@ -114,6 +115,8 @@ const GetArtifactSchema = z.object({
 const UpdateIssueScratchpadSchema = z.object({
   text: z.string().max(4096).describe("Scratchpad text to persist for the next invocation (≤4KB)"),
 });
+
+const ListRelatedArtifactsSchema = z.object({}).optional();
 
 const ArtifactSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("file_diff"), path: z.string(), diff: z.string().max(64_000).optional(), additions: z.number().optional(), deletions: z.number().optional() }),
@@ -229,6 +232,11 @@ export const TOOL_DEFINITIONS = [
     name: "symphony.get_artifact",
     description: "Read an artifact by ID. Supports full, head, tail, and search modes.",
     inputSchema: zodToInputSchema(GetArtifactSchema),
+  },
+  {
+    name: "symphony.list_related_artifacts",
+    description: "Lists artifacts from related issues: siblings in the same plan run, blockers, and parents/children of plan runs. Excludes this issue's own artifacts.",
+    inputSchema: zodToInputSchema(ListRelatedArtifactsSchema),
   },
   {
     name: "symphony.update_issue_scratchpad",
@@ -506,6 +514,18 @@ export async function handleTool(
       };
     }
 
+    case "symphony.list_related_artifacts": {
+      ListRelatedArtifactsSchema.parse(params);
+      const issue = tracker.getIssue(issueUuid);
+      if (!issue) throw new Error(`Issue ${issueUuid} not found`);
+      const related = collectRelatedIssueUuids(tracker, issueUuid, issue);
+      const artifacts = tracker.listArtifactsByIssues(related);
+      return {
+        related_issue_uuids: related,
+        artifacts: artifacts.map(({ storage_path, content, ...rest }) => rest),
+      };
+    }
+
     case "symphony.update_issue_scratchpad": {
       const parsed = UpdateIssueScratchpadSchema.parse(params);
       tracker.updateIssueScratchpad(issueUuid, parsed.text);
@@ -592,4 +612,22 @@ function buildPreviousInvocations(issueUuid: string, tracker: Tracker): unknown[
   } catch {
     return [];
   }
+}
+
+function collectRelatedIssueUuids(tracker: Tracker, issueUuid: string, issue: NonNullable<ReturnType<Tracker["getIssue"]>>): string[] {
+  const related = new Set<string>();
+  if (issue.plan_run_id) {
+    for (const i of tracker.listIssuesByPlanRun(issue.plan_run_id)) {
+      if (i.uuid !== issueUuid) related.add(i.uuid);
+    }
+    const run = tracker.getPlanRun(issue.plan_run_id);
+    if (run?.caller_issue_uuid && run.caller_issue_uuid !== issueUuid) related.add(run.caller_issue_uuid);
+  }
+  for (const b of issue.blockers) related.add(b.blocker_uuid);
+  for (const run of tracker.listPlanRuns()) {
+    if (run.caller_issue_uuid === issueUuid) {
+      for (const i of tracker.listIssuesByPlanRun(run.id)) related.add(i.uuid);
+    }
+  }
+  return [...related];
 }

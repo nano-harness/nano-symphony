@@ -135,6 +135,9 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     ...invocation.env,
     SYMPHONY_MCP_URL: opts.mcpUrl,
     SYMPHONY_TOKEN: opts.token,
+    // Stable identity for agent-side cache/resume correlation.
+    SYMPHONY_RESUME_IDENTITY: `${opts.issueUuid}:${opts.attempt}`,
+    NANO_CACHE_KEY: opts.issueUuid,
     ...(opts.extraEnv ?? {}),
   };
 

@@ -4,17 +4,36 @@ import { runWorker, type WorkerContext } from "./worker.ts";
 import { config } from "../config.ts";
 import type { Logger } from "pino";
 import { tickPendingPlans, tickApprovedPlans, tickFinalizedPlans, tickExpiredPlans } from "./plan-tick.ts";
+import { syncParentPlanRunProgress } from "./plan-progress.ts";
 
-class Semaphore {
+export class Semaphore {
+  private max: number;
   private count: number;
   private queue: Array<() => void> = [];
 
   constructor(max: number) {
+    this.max = max;
     this.count = max;
   }
 
   available(): number {
     return this.count;
+  }
+
+  active(): number {
+    return this.max - this.count;
+  }
+
+  status(): { limit: number; available: number; active: number } {
+    return { limit: this.max, available: this.count, active: this.active() };
+  }
+
+  setMax(newMax: number): void {
+    if (newMax < 1) newMax = 1;
+    const active = this.active();
+    this.max = newMax;
+    // Preserve currently-active slots; never make more available than the new limit allows.
+    this.count = Math.max(0, newMax - active);
   }
 
   acquire(): Promise<void> {
@@ -39,6 +58,7 @@ export interface Orchestrator {
   start(): void;
   stop(): Promise<void>;
   kick(): void;
+  getConcurrencyStatus(): { limit: number; available: number; active: number };
 }
 
 export function createOrchestrator(
@@ -60,6 +80,13 @@ export function createOrchestrator(
     await tickApprovedPlans(tracker, logger);
     await tickFinalizedPlans(tracker, logger);
     await tickExpiredPlans(tracker, logger);
+
+    // Sync parent issue progress for active plan runs and complete parents when done.
+    syncParentPlanRunProgress(tracker, logger);
+
+    // Honor workflow-level concurrency limit, falling back to the env default.
+    const maxConcurrent = wf.workflow.polling?.max_concurrent_agents ?? config.MAX_CONCURRENT_AGENTS;
+    sem.setMax(maxConcurrent);
 
     const slots = sem.available();
     if (slots <= 0) return 0; // Already at capacity, skip this tick
@@ -86,9 +113,10 @@ export function createOrchestrator(
         }),
     ].slice(0, slots);
 
-    // Auto-release stale claimed runs before dispatching new work
-    const STALE_RUN_TIMEOUT_MS = 5 * 60 * 1000;
-    const staleRuns = tracker.fetchStaleRuns(Date.now() - STALE_RUN_TIMEOUT_MS);
+    // Auto-release stale claimed runs before dispatching new work.
+    // Use the configured heartbeat timeout so operators can tune liveness detection.
+    const staleThreshold = Date.now() - config.AGENT_HEARTBEAT_TIMEOUT_MS;
+    const staleRuns = tracker.fetchStaleRuns(staleThreshold);
     for (const staleRun of staleRuns) {
       tracker.withTransaction(() => {
         tracker.releaseIssue(staleRun.issue_uuid, "released");
@@ -109,7 +137,13 @@ export function createOrchestrator(
           tracker.updateIssueState(issueUuid, "planning");
           tracker.recordEvent(issueUuid, "planning_triggered", "Issue requires a plan — entering planning mode", { require_plan: true });
         }
-        return tracker.claimIssue(issueUuid, attempt);
+        // Configure per-run heartbeat timeout so stale detection honors the env config.
+        tracker.setHeartbeatTimeout(issueUuid, config.AGENT_HEARTBEAT_TIMEOUT_MS);
+        const claimed = tracker.claimIssue(issueUuid, attempt);
+        // Seed heartbeat_at so the run is not considered stale before the first
+        // process-level heartbeat fires (nano 30s / claude 60s).
+        if (claimed) tracker.updateHeartbeat(issueUuid, Date.now());
+        return claimed;
       });
       if (!claimed) continue; // Already claimed by another tick
 
@@ -143,6 +177,9 @@ export function createOrchestrator(
   }
 
   return {
+    getConcurrencyStatus() {
+      return sem.status();
+    },
     start() {
       running = true;
       logger.info("Orchestrator started");

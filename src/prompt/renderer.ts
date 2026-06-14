@@ -103,16 +103,39 @@ export async function renderPrompt(
   let prefix = "";
   const meta: RenderPromptMeta = { commentIds: [], truncated: false };
 
-  // Inject reviewer notes if present
+  // Inject reviewer notes if present (general revision_request or plan revision feedback)
   if (opts.tracker && opts.issueUuid) {
-    const revisionEvent = opts.tracker.getLatestEventByKind(opts.issueUuid, "revision_requested");
+    const generalRevision = opts.tracker.getLatestEventByKind(opts.issueUuid, "revision_requested");
+    const planRevision = opts.tracker.getLatestEventByKind(opts.issueUuid, "plan_revision_requested");
     const startedEvent = opts.tracker.getLatestEventByKind(opts.issueUuid, "started");
 
-    // Only inject if revision_requested is more recent than the last started event
+    const revisionEvent = planRevision && generalRevision
+      ? (planRevision.ts > generalRevision.ts ? planRevision : generalRevision)
+      : (planRevision ?? generalRevision);
+
+    // Only inject if revision event is more recent than the last started event
     if (revisionEvent && (!startedEvent || revisionEvent.ts > startedEvent.ts)) {
-      const payload = JSON.parse(revisionEvent.payload_json ?? "{}") as { note?: string };
-      if (payload.note) {
-        prefix += `Reviewer requested changes:\n${payload.note}\n\nAddress these in this attempt.\n\n`;
+      const payload = JSON.parse(revisionEvent.payload_json ?? "{}") as {
+        note?: string;
+        feedback?: { category: string; severity: string; must_fix?: string[] };
+      };
+      if (payload.note || payload.feedback) {
+        prefix += "Reviewer requested changes:\n";
+        if (payload.feedback) {
+          prefix += `Category: ${payload.feedback.category}\n`;
+          prefix += `Severity: ${payload.feedback.severity}\n`;
+          if (payload.feedback.must_fix && payload.feedback.must_fix.length > 0) {
+            prefix += "Must fix:\n";
+            for (const item of payload.feedback.must_fix) {
+              prefix += `- ${item}\n`;
+            }
+          }
+          prefix += "\n";
+        }
+        if (payload.note) {
+          prefix += `${payload.note}\n\n`;
+        }
+        prefix += "Address these in this attempt.\n\n";
       }
     }
   }

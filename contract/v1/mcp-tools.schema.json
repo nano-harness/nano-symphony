@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://nano.symphony/contract/v1/mcp-tools.schema.json",
+  "title": "Symphony MCP Tools",
+  "description": "JSON-RPC tool definitions exposed by nano-symphony's MCP server.",
+  "type": "object",
+  "properties": {
+    "symphony.fetch_issue": {
+      "description": "Fetch the current issue context, attempt number, and previous invocations.",
+      "arguments": {},
+      "response": {
+        "type": "object",
+        "properties": {
+          "uuid": { "type": "string" },
+          "identifier": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "state": { "type": "string" },
+          "attempt": { "type": "integer" },
+          "previous_invocations": { "type": "array" }
+        }
+      }
+    },
+    "symphony.report_event": {
+      "description": "Report a progress event. Payload must be <= 64KB.",
+      "arguments": {
+        "type": "object",
+        "required": ["kind", "message"],
+        "properties": {
+          "kind": { "type": "string" },
+          "message": { "type": "string" },
+          "payload": { "type": "object" }
+        }
+      }
+    },
+    "symphony.report_goal_state": {
+      "description": "Report goal evaluation progress.",
+      "arguments": {
+        "type": "object",
+        "required": ["achieved", "last_reason"],
+        "properties": {
+          "achieved": { "type": "boolean" },
+          "last_reason": { "type": "string" }
+        }
+      }
+    },
+    "symphony.submit_plan": {
+      "description": "Submit an implementation plan. Only allowed when the issue is in 'planning' state.",
+      "arguments": {
+        "type": "object",
+        "required": ["markdown"],
+        "properties": {
+          "markdown": { "type": "string" },
+          "steps": { "type": "array", "items": { "type": "string" } },
+          "estimates": { "type": "object" }
+        }
+      }
+    },
+    "symphony.emit_result": {
+      "description": "Emit a structured result conforming to the issue's expected_schema.",
+      "arguments": {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+          "data": {}
+        }
+      }
+    },
+    "symphony.spawn_plan_run": {
+      "description": "Spawn a new plan run asynchronously.",
+      "arguments": {
+        "type": "object",
+        "required": ["script", "meta"],
+        "properties": {
+          "script": { "type": "string" },
+          "meta": {
+            "type": "object",
+            "required": ["name", "max_issues"],
+            "properties": {
+              "name": { "type": "string" },
+              "max_issues": { "type": "integer", "minimum": 1, "maximum": 100 },
+              "max_budget_tokens": { "type": "integer" },
+              "phases": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "args": {},
+          "wall_time_ms": { "type": "integer" }
+        }
+      }
+    },
+    "symphony.spawn_plan_run_and_handoff": {
+      "description": "Spawn a plan run and hand off the current issue until it completes.",
+      "arguments": {
+        "$ref": "#/properties/symphony.spawn_plan_run/arguments"
+      }
+    },
+    "symphony.session_completed": {
+      "description": "Required end-of-session signal.",
+      "arguments": {
+        "type": "object",
+        "required": ["semantics"],
+        "properties": {
+          "semantics": { "type": "string", "enum": ["success", "needs_retry", "abandoned", "timeout", "handoff"] },
+          "summary": { "type": "string" },
+          "artifact": { "type": "string" },
+          "follow_ups": { "type": "array", "items": { "type": "string" } },
+          "blocker_fingerprint": { "type": "string" },
+          "termination_cause": { "type": "string" }
+        }
+      }
+    }
+  }
+}

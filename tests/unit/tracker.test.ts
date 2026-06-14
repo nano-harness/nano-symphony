@@ -71,6 +71,35 @@ describe("tracker", () => {
     tracker.insertBlocker(issue2.uuid, issue1.uuid, "todo");
     expect(tracker.getIssue(issue2.uuid)!.blockers).toEqual([{ blocker_uuid: issue1.uuid, blocker_state: "todo" }]);
   });
+  test("removeBlocker removes a blocker relationship", () => {
+    const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo" });
+    const issue2 = tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "backlog" });
+    tracker.insertBlocker(issue2.uuid, issue1.uuid, "todo");
+    tracker.removeBlocker(issue2.uuid, issue1.uuid);
+    expect(tracker.getIssue(issue2.uuid)!.blockers).toEqual([]);
+  });
+  test("updateIssueState syncs blocker_state for dependent issues", () => {
+    const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo" });
+    const issue2 = tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "backlog" });
+    tracker.insertBlocker(issue2.uuid, issue1.uuid, "todo");
+    tracker.updateIssueState(issue1.uuid, "done");
+    expect(tracker.getIssue(issue2.uuid)!.blockers).toEqual([{ blocker_uuid: issue1.uuid, blocker_state: "done" }]);
+  });
+  test("getCandidates excludes issues with unresolved blockers", () => {
+    const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo" });
+    const issue2 = tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "todo" });
+    tracker.insertBlocker(issue2.uuid, issue1.uuid, "todo");
+    const candidates = tracker.getCandidates(10);
+    expect(candidates.map((c) => c.uuid)).toEqual([issue1.uuid]);
+  });
+  test("getCandidates includes issues when blockers are done or cancelled", () => {
+    const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo" });
+    const issue2 = tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "todo" });
+    tracker.insertBlocker(issue2.uuid, issue1.uuid, "todo");
+    tracker.updateIssueState(issue1.uuid, "done");
+    const candidates = tracker.getCandidates(10);
+    expect(candidates.map((c) => c.uuid)).toContain(issue2.uuid);
+  });
   test("getCandidates returns eligible issues", () => {
     const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo", priority: "high" });
     tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "todo", priority: "low" });
@@ -183,5 +212,21 @@ describe("tracker", () => {
       issue_prompts: [],
       max_issues: 1,
     });
+  });
+  test("updateIssuePlanEstimates and updateIssuePlanActuals round-trip", () => {
+    const issue = tracker.insertIssue({ uuid: "uuid-est", title: "Estimates", state: "todo" });
+    tracker.updateIssuePlanEstimates(issue.uuid, { complexity: "medium", files_touched: 5, estimated_turns: 3 });
+    tracker.updateIssuePlanActuals(issue.uuid, { actual_complexity: "high", actual_files_touched: 8, actual_turns: 5 });
+    const updated = tracker.getIssue(issue.uuid)!;
+    expect(JSON.parse(updated.plan_estimates_json!)).toEqual({ complexity: "medium", files_touched: 5, estimated_turns: 3 });
+    expect(JSON.parse(updated.plan_actuals_json!)).toEqual({ actual_complexity: "high", actual_files_touched: 8, actual_turns: 5 });
+  });
+  test("listIssues includes cost_usd and token_total from llm_calls", () => {
+    const issue = tracker.insertIssue({ uuid: "uuid-cost", title: "Cost", state: "todo" });
+    tracker.recordLlmCall({ issue_uuid: issue.uuid, attempt: 0, input_tokens: 100, output_tokens: 50, cost_usd: 0.123, provider: "test", model: "test", duration_ms: 1000, duration_api_ms: 800 });
+    tracker.recordLlmCall({ issue_uuid: issue.uuid, attempt: 1, input_tokens: 200, output_tokens: 100, cost_usd: 0.2, provider: "test", model: "test", duration_ms: 1000, duration_api_ms: 800 });
+    const listed = tracker.listIssues().find((i) => i.uuid === issue.uuid)!;
+    expect(listed.cost_usd).toBeCloseTo(0.323, 3);
+    expect(listed.token_total).toBe(450);
   });
 });

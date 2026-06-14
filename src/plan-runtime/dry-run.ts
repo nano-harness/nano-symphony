@@ -75,7 +75,7 @@ export async function dryRun(input: DryRunInput): Promise<DryRunSummary> {
       );
     }
     const promptPrefix = prompt.slice(0, 80);
-    issuePrompts.push({ phase: currentPhase, prompt_prefix: promptPrefix, has_schema: !!opts?.schema });
+    issuePrompts.push({ phase: currentPhase, prompt_prefix: promptPrefix, has_schema: !!opts?.schema, gated: !!opts?.gate });
     return Promise.resolve(synthesizeStub(opts?.schema));
   }
 
@@ -141,7 +141,8 @@ export async function dryRun(input: DryRunInput): Promise<DryRunSummary> {
         );
       }
       const promptPrefix = n.prompt.slice(0, 80);
-      issuePrompts.push({ phase: currentPhase, prompt_prefix: promptPrefix, has_schema: !!n.opts?.schema });
+      const gated = !!(n.opts?.gate ?? n.gate);
+      issuePrompts.push({ phase: currentPhase, prompt_prefix: promptPrefix, has_schema: !!(n.opts?.schema), gated });
       result[n.id] = synthesizeStub(n.opts?.schema);
     }
     return result;

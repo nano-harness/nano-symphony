@@ -129,6 +129,21 @@ export function Dashboard() {
     showToast(editingIssue() ? "Changes saved" : "Movement composed");
   };
 
+  const handleExport = async (format: "json" | "csv") => {
+    try {
+      const blob = await api.exportMetrics(format);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `symphony-metrics.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Metrics exported as ${format.toUpperCase()}`, "success");
+    } catch {
+      showToast("Export failed", "error");
+    }
+  };
+
   const confirmDelete = (id: string) => {
     setDeletingId(id);
   };
@@ -207,6 +222,14 @@ export function Dashboard() {
         <A href="/workflow" class="btn btn-secondary">
           Edit Workflow
         </A>
+        <div class="export-group">
+          <button class="btn btn-secondary" onClick={() => handleExport("json")} title="Export metrics JSON">
+            ⬇ JSON
+          </button>
+          <button class="btn btn-secondary" onClick={() => handleExport("csv")} title="Export metrics CSV">
+            ⬇ CSV
+          </button>
+        </div>
       </div>
 
       <Show when={viewMode() === "list"}>
@@ -225,6 +248,7 @@ export function Dashboard() {
               <div class="score-header-cell">Movement</div>
               <div class="score-header-cell">State</div>
               <div class="score-header-cell">Priority</div>
+              <div class="score-header-cell">Cost</div>
               <div class="score-header-cell">Actions</div>
             </div>
             <ul class="score-list">
@@ -236,7 +260,10 @@ export function Dashboard() {
                     onClick={() => navigate(`/issues/${issue.uuid}`)}
                   >
                     <div class="bar-num">{index() + 1}</div>
-                    <div class="bar-title">{issue.title}</div>
+                    <div class="bar-title">
+                      <span class="bar-identifier">{issue.identifier}</span>
+                      {issue.title}
+                    </div>
                     <div class="bar-state">
                       <span class={`pill ${issue.state}`}>
                         {issue.state.replace("_", " ")}
@@ -245,6 +272,11 @@ export function Dashboard() {
                     <div class="bar-priority">
                       <span class={`priority-dot ${issue.priority}`}></span>
                       <span class="priority-text">{issue.priority}</span>
+                    </div>
+                    <div class="bar-cost">
+                      <Show when={(issue.cost_usd ?? 0) > 0}>
+                        <span class="pill cost">${(issue.cost_usd ?? 0).toFixed(2)}</span>
+                      </Show>
                     </div>
                     <div class="bar-actions" onClick={(e) => e.stopPropagation()}>
                       <button
@@ -389,6 +421,17 @@ function BoardView(props: {
                       onClick={() => props.onCardClick(issue.uuid)}
                     >
                       <div class="board-card-title">{issue.title}</div>
+                      <div class="board-card-badges">
+                        <Show when={issue.agent_role}>
+                          <span class="badge role">{issue.agent_role}</span>
+                        </Show>
+                        <Show when={issue.state === "plan_review" && issue.labels.includes("plan-sub-task")}>
+                          <span class="badge gate">gate</span>
+                        </Show>
+                        <Show when={(issue.cost_usd ?? 0) > 0}>
+                          <span class="badge cost">${(issue.cost_usd ?? 0).toFixed(2)}</span>
+                        </Show>
+                      </div>
                       <div class="board-card-meta">
                         <span class={`priority-dot ${issue.priority}`}></span>
                         <span class="priority-text">{issue.priority}</span>

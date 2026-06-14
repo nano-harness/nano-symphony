@@ -96,23 +96,29 @@ cleanup_source_mode() {
 # agent sessions on this machine can pick it up immediately without
 # needing a per-workspace sync.
 install_skill_globally() {
-    local skill_src="${INSTALL_DIR}/share/skills/nano-symphony"
-    if [ ! -d "${skill_src}" ]; then
-        log_warn "skill source missing at ${skill_src}, skipping global skill install"
+    local skills_dir="${INSTALL_DIR}/share/skills"
+    if [ ! -d "${skills_dir}" ]; then
+        log_warn "skills directory missing at ${skills_dir}, skipping global skill install"
         return
     fi
 
-    local nano_dest="${HOME}/.nano/skills/nano-symphony"
-    mkdir -p "${nano_dest}"
-    cp -R "${skill_src}/." "${nano_dest}/"
-    log_info "Installed symphony skill to ${nano_dest}"
+    for skill_src in "${skills_dir}"/*; do
+        [ -d "${skill_src}" ] || continue
+        local skill_name
+        skill_name="$(basename "${skill_src}")"
 
-    if [ -d "${HOME}/.claude" ]; then
-        local claude_dest="${HOME}/.claude/skills/nano-symphony"
-        mkdir -p "${claude_dest}"
-        cp -R "${skill_src}/." "${claude_dest}/"
-        log_info "Installed symphony skill to ${claude_dest}"
-    fi
+        local nano_dest="${HOME}/.nano/skills/${skill_name}"
+        mkdir -p "${nano_dest}"
+        cp -R "${skill_src}/." "${nano_dest}/"
+        log_info "Installed ${skill_name} skill to ${nano_dest}"
+
+        if [ -d "${HOME}/.claude" ]; then
+            local claude_dest="${HOME}/.claude/skills/${skill_name}"
+            mkdir -p "${claude_dest}"
+            cp -R "${skill_src}/." "${claude_dest}/"
+            log_info "Installed ${skill_name} skill to ${claude_dest}"
+        fi
+    done
 }
 
 # Download and install

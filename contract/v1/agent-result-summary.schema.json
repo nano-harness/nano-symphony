@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://nano.symphony/contract/v1/agent-result-summary.schema.json",
+  "title": "AgentResultSummary",
+  "description": "Contract payload emitted by an agent process as the last line of stdout and written to result.json.",
+  "type": "object",
+  "required": ["status"],
+  "additionalProperties": true,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "needs_retry", "abandoned", "timeout"],
+      "description": "Completion semantics of the agent run."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable summary of the outcome."
+    },
+    "termination_cause": {
+      "type": "string",
+      "description": "Structured enum describing why the run ended.",
+      "examples": [
+        "natural_completion",
+        "goal_max_turns",
+        "goal_stopped",
+        "goal_unresolved",
+        "timeout",
+        "llm_failure",
+        "exitcode_mismatch",
+        "no_result_payload",
+        "panic",
+        "classifier_lockout"
+      ]
+    },
+    "blocker_fingerprint": {
+      "type": "string",
+      "description": "Stable identifier for a retryable blocker, used for short-circuit detection."
+    },
+    "blocked_commands_sample": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string" },
+      "description": "Sample of commands blocked by the permission system."
+    },
+    "tool_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total number of tool calls made during the run.",
+      "default": 0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "description": "Wall-clock duration of the run in milliseconds."
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "cached": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "goal_state": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "condition": { "type": "string" },
+        "active": { "type": "boolean" },
+        "turns_evaluated": { "type": "integer", "minimum": 0 },
+        "max_turns": { "type": "integer", "minimum": 0 },
+        "last_reason": { "type": "string" },
+        "achieved_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "cache_key": {
+      "type": "string",
+      "description": "Optional cache key used to correlate retries."
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "backend": { "type": "string" },
+        "network": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

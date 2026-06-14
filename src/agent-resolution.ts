@@ -24,8 +24,22 @@ export interface AgentDefaults {
   maxRetries?: number;
 }
 
+export interface AgentRoleProfile extends AgentDefaults {
+  extra_env?: Record<string, string>;
+  permission_mode?: string;
+  permissions?: {
+    allow?: string[];
+    deny?: string[];
+    denial_max_consecutive?: number;
+    denial_max_total?: number;
+  };
+  sandbox?: Record<string, unknown>;
+  trusted_binaries?: string[];
+  hooks?: Record<string, unknown>;
+}
+
 /**
- * 统一解析 agent 配置。只认两层：运行时覆盖 vs 配置默认。
+ * 统一解析 agent 配置。优先级：issue 字段 > plan-runtime 覆盖 > role 配置 > 顶层 agent 默认。
  *
  * 调用方决定 override 从哪来（plan-runtime 或 issue），不必关心内部优先级链。
  *
@@ -37,16 +51,20 @@ export interface AgentDefaults {
 export function resolveAgent(
   override: AgentOverride | null | undefined,
   defaults: AgentDefaults = {},
-): ResolvedAgent {
-  const kind = override?.kind ?? defaults.kind ?? "claude-code";
+  roleProfile?: AgentRoleProfile | null,
+): ResolvedAgent & { roleProfile?: AgentRoleProfile | null } {
+  const baseKind = roleProfile?.kind ?? defaults.kind ?? "claude-code";
+  const kind = override?.kind ?? baseKind;
   const binary =
     override?.binary ??
     (override?.kind ? AGENT_KIND_BINARY_DEFAULTS[override.kind] : undefined) ??
+    roleProfile?.binary ??
+    (roleProfile?.kind ? AGENT_KIND_BINARY_DEFAULTS[roleProfile.kind] : undefined) ??
     defaults.binary ??
     AGENT_KIND_BINARY_DEFAULTS[kind] ??
     "claude";
-  const timeoutMs = defaults.timeoutMs ?? 3_600_000;
-  const maxRetries = defaults.maxRetries ?? 3;
+  const timeoutMs = roleProfile?.timeoutMs ?? defaults.timeoutMs ?? 3_600_000;
+  const maxRetries = roleProfile?.maxRetries ?? defaults.maxRetries ?? 3;
 
-  return { kind, binary, timeoutMs, maxRetries };
+  return { kind, binary, timeoutMs, maxRetries, roleProfile };
 }

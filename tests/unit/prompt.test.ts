@@ -16,4 +16,35 @@ describe("renderPrompt", () => {
     expect(r.meta.commentIds).toEqual([]);
     expect(r.meta.truncated).toBe(false);
   });
+  test("injects structured plan revision feedback into planning prompt", async () => {
+    const tracker = {
+      getLatestEventByKind: (issueUuid: string, kind: string) => {
+        if (kind === "plan_revision_requested") {
+          return {
+            id: "rev1",
+            issue_uuid: issueUuid,
+            ts: 2000,
+            kind: "plan_revision_requested",
+            message: "Revise",
+            payload_json: JSON.stringify({
+              note: "Add more tests",
+              feedback: { category: "missing_tests", severity: "blocking", must_fix: ["Cover edge cases", "Add integration test"] },
+            }),
+          };
+        }
+        if (kind === "started") return { ts: 1000 } as unknown as ReturnType<typeof tracker.getLatestEventByKind>;
+        return null;
+      },
+      listComments: () => [],
+      getIssue: () => ({ state: "planning" }),
+    } as unknown as NonNullable<Parameters<typeof renderPrompt>[2]>["tracker"] & { listComments: () => [] };
+    const r = await renderPrompt("Plan", {}, { tracker, issueUuid: "issue-1" });
+    expect(r.text).toContain("Reviewer requested changes:");
+    expect(r.text).toContain("Category: missing_tests");
+    expect(r.text).toContain("Severity: blocking");
+    expect(r.text).toContain("Must fix:");
+    expect(r.text).toContain("Cover edge cases");
+    expect(r.text).toContain("Add integration test");
+    expect(r.text).toContain("Add more tests");
+  });
 });
