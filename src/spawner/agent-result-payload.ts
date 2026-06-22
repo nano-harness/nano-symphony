@@ -21,13 +21,20 @@ export const AgentResultSummarySchema = z.object({
     backend: z.string().optional(),
     network: z.string().optional(),
   }).passthrough().optional(),
-}).passthrough();
+}).passthrough().superRefine((data, ctx) => {
+  // Contract rule: non-success statuses must include a non-empty reason.
+  if (data.status !== "success" && (!data.reason || typeof data.reason !== "string" || data.reason.trim() === "")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `reason is required for non-success status`,
+      path: ["reason"],
+    });
+  }
+});
 
 export type AgentResultSummary = z.infer<typeof AgentResultSummarySchema>;
 
-export const AgentArtifactsSchema = z.object({
-  patch: z.string().optional(),
-});
+export const AgentArtifactsSchema = z.object({}).passthrough();
 export type AgentArtifacts = z.infer<typeof AgentArtifactsSchema>;
 
 // S8: Sanitize a parsed JSON value to remove prototype-pollution keys before

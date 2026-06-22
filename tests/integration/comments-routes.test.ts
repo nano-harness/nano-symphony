@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { Database } from "bun:sqlite";
 import { runMigrations } from "../../src/db/migrations.ts";
 import { createTracker } from "../../src/db/tracker.ts";
-import { createRoutes } from "../../src/http/routes.ts";
+import { createRoutes } from "../../src/http/routes/index.ts";
 
 function makeApp() {
   const db = new Database(":memory:");

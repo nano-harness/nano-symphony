@@ -2,7 +2,7 @@ import path from "path";
 import fs from "fs/promises";
 import type { SpawnContext, AgentAdapterConfig } from "./types.ts";
 import type { AgentResultSummary, AgentArtifacts } from "./agent-result-payload.ts";
-import { getAdapter, type AgentKind } from "./agent-adapter.ts";
+import { getAdapter, type AgentKind, isMcpTransport } from "./agent-adapter.ts";
 import { stripSymphonyInternals } from "./env.ts";
 
 // Eagerly import adapters so they self-register
@@ -27,7 +27,7 @@ export interface SpawnOptions {
   agentKind: AgentKind;
   logger?: { warn: (obj: unknown, msg: string) => void };
   onStreamEvent?: (event: { kind: string; message: string; payload?: Record<string, unknown> }) => void;
-  // S9: Called with the spawned process PID so the caller can persist it for crash-restart cleanup.
+  // Called with the spawned process PID so the caller can persist it for crash-restart cleanup.
   onPidAssigned?: (pid: number) => void;
   // Heartbeat: track last heartbeat timestamp for liveness monitoring
   onHeartbeat?: (ts: number) => void;
@@ -43,7 +43,7 @@ export interface SpawnResult {
   duration_ms: number;
   agentResult: AgentResultSummary | null;
   artifacts: AgentArtifacts;
-  // S10: True if stdout was truncated at the 32MB cap.
+  // True if stdout was truncated at the 32MB cap.
   stdoutTruncated?: boolean;
 }
 
@@ -118,6 +118,16 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     await fs.writeFile(filePath, file.contents, { encoding: "utf-8", mode: file.mode });
   }
 
+  // In CLI-first mode, make sure a stale .mcp.json from a previous attempt is
+  // removed so the agent cannot auto-discover the MCP server.
+  if (!isMcpTransport(ctx.config)) {
+    try {
+      await fs.unlink(path.join(workspace, ".mcp.json"));
+    } catch {
+      // ignore if absent
+    }
+  }
+
   const logsDir = path.join(workspace, "logs");
   await fs.mkdir(logsDir, { recursive: true });
   const logFile = path.join(logsDir, `attempt-${attempt}.log`);
@@ -125,21 +135,25 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Build spawn invocation from adapter
   const invocation = adapter.buildSpawnInvocation(ctx);
 
-  // S10: Spawner injects binary at argv[0] so all adapters are consistent
+  // Spawner injects binary at argv[0] so all adapters are consistent
   const argv = [opts.binary, ...invocation.argv];
 
   // Env: start from user's full environment minus symphony's own service credentials,
-  // then merge adapter-specific vars (MCP URL, token, etc.) and workflow extra_env.
+  // then merge adapter-specific vars and workflow extra_env. In CLI-first mode we do
+  // NOT leak SYMPHONY_MCP_URL / SYMPHONY_TOKEN so the agent cannot auto-discover the
+  // MCP server; the adapter writes them to workspace-local files instead.
   const env: Record<string, string> = {
     ...stripSymphonyInternals(process.env),
     ...invocation.env,
-    SYMPHONY_MCP_URL: opts.mcpUrl,
-    SYMPHONY_TOKEN: opts.token,
     // Stable identity for agent-side cache/resume correlation.
     SYMPHONY_RESUME_IDENTITY: `${opts.issueUuid}:${opts.attempt}`,
     NANO_CACHE_KEY: opts.issueUuid,
     ...(opts.extraEnv ?? {}),
   };
+  if (isMcpTransport(ctx.config)) {
+    env.SYMPHONY_MCP_URL = opts.mcpUrl;
+    env.SYMPHONY_TOKEN = opts.token;
+  }
 
   const startedAt = Date.now();
   let killedByTimeout = false;
@@ -186,7 +200,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     killTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), SIGKILL_ESCALATION_MS);
   };
   activeProcesses.set(issueUuid, { proc, kill: killFn });
-  // S9: Notify caller of the PID so it can be persisted for crash-restart cleanup.
+  // Notify caller of the PID so it can be persisted for crash-restart cleanup.
   onPidAssigned?.(proc.pid);
 
   // Heartbeat: start a process-level heartbeat timer that updates heartbeat_at
@@ -211,7 +225,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   logStream.write("--- log start ---\n");
 
   // Capture stdout for result parsing.
-  // A1: Cap head accumulation at 32MB to prevent OOM from runaway agents.
+  // Cap head accumulation at 32MB to prevent OOM from runaway agents.
   // Additionally keep a 1MB tail ring buffer so the final JSON result line (which
   // appears at the very end of stdout) is always available even when the head is
   // truncated.  Without the tail buffer a >32MB run would be misclassified as
@@ -232,26 +246,44 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // Head buffer: accumulate until the cap.
+        // Head buffer: accumulate until the cap. When a chunk crosses the
+        // boundary, keep the prefix in the head buffer and send the suffix to
+        // the tail ring buffer so the final JSON result line is preserved.
         if (!stdoutTruncated) {
-          stdoutBytes += value.byteLength;
-          if (stdoutBytes > STDOUT_BUFFER_LIMIT) {
-            stdoutTruncated = true;
-            // The chunk that crosses the boundary goes into the tail buffer
-            // so it isn't lost (it may contain the start of the result JSON).
-          } else {
+          const remaining = STDOUT_BUFFER_LIMIT - stdoutBytes;
+          if (value.byteLength <= remaining) {
             stdoutChunks.push(value);
+            stdoutBytes += value.byteLength;
+          } else {
+            stdoutTruncated = true;
+            if (remaining > 0) {
+              const headPart = value.subarray(0, remaining);
+              const tailPart = value.subarray(remaining);
+              stdoutChunks.push(headPart);
+              stdoutBytes += headPart.byteLength;
+              tailChunks.push(tailPart);
+              tailBytes += tailPart.byteLength;
+            } else {
+              tailChunks.push(value);
+              tailBytes += value.byteLength;
+            }
           }
-        }
-        // Tail ring buffer: always keep the most recent TAIL_BUFFER_LIMIT bytes so
-        // the final result JSON line is never dropped.  This includes the
-        // boundary-crossing chunk that triggered truncation.
-        if (stdoutTruncated) {
+        } else {
+          // Already truncated: feed everything into the tail ring buffer.
           tailChunks.push(value);
           tailBytes += value.byteLength;
-          // Trim oldest tail chunks when over budget
-          while (tailBytes > TAIL_BUFFER_LIMIT && tailChunks.length > 1) {
-            tailBytes -= tailChunks.shift()!.byteLength;
+        }
+        // Trim oldest tail chunks when over budget. If a single chunk exceeds
+        // the tail limit, slice it so we always keep the most recent bytes.
+        while (tailBytes > TAIL_BUFFER_LIMIT && tailChunks.length > 0) {
+          const first = tailChunks[0];
+          const over = tailBytes - TAIL_BUFFER_LIMIT;
+          if (over >= first.byteLength) {
+            tailBytes -= first.byteLength;
+            tailChunks.shift();
+          } else {
+            tailChunks[0] = first.subarray(over);
+            tailBytes -= over;
           }
         }
         logStream.write(value);
@@ -293,7 +325,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   const timeoutHandle = setTimeout(() => {
     killedByTimeout = true;
-    killFn(); // S3: kill entire process tree (same as cancel), not just the direct child
+    killFn(); // kill entire process tree (same as cancel), not just the direct child
   }, timeoutMs);
 
   const exitCode = await proc.exited;

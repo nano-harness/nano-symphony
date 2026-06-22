@@ -43,7 +43,7 @@ agent:
     planner:
       kind: nano
       permission_mode: default
-      allowed_tools: ["mcp__symphony__*", "ReadFile", "Glob"]
+      allowed_tools: ["mcp_symphony_*", "ReadFile", "Glob"]
     executor:
       kind: nano
       permission_mode: auto

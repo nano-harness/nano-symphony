@@ -115,10 +115,15 @@ export async function renderPrompt(
 
     // Only inject if revision event is more recent than the last started event
     if (revisionEvent && (!startedEvent || revisionEvent.ts > startedEvent.ts)) {
-      const payload = JSON.parse(revisionEvent.payload_json ?? "{}") as {
+      let payload: {
         note?: string;
         feedback?: { category: string; severity: string; must_fix?: string[] };
-      };
+      } = {};
+      try {
+        payload = JSON.parse(revisionEvent.payload_json ?? "{}") as typeof payload;
+      } catch (err) {
+        console.warn(`[renderPrompt] ignoring malformed revision payload for ${opts.issueUuid}: ${err instanceof Error ? err.message : String(err)}`);
+      }
       if (payload.note || payload.feedback) {
         prefix += "Reviewer requested changes:\n";
         if (payload.feedback) {
@@ -151,34 +156,27 @@ export async function renderPrompt(
     }
   }
 
-  // Inject planning instruction if issue is in planning state
+  // Inject "Plan First" instruction if issue requires a plan
   if (opts.tracker && opts.issueUuid) {
     const issue = opts.tracker.getIssue(opts.issueUuid);
-    if (issue && issue.state === "planning") {
+    if (issue && issue.require_plan === true && issue.state !== "awaiting_plan") {
       prefix +=
-        `## Planning Mode\n\n` +
-        `You are in PLANNING mode. Your task is to analyze the issue and produce a detailed implementation plan.\n\n` +
-        `1. Break down the work into clear steps\n` +
-        `2. Estimate complexity, files touched, and expected turns\n` +
-        `3. Submit your plan using: symphony.submit_plan({ markdown: "...", steps: [...], estimates: {...} })\n` +
-        `4. After submitting the plan, call symphony.session_completed\n\n` +
-        `Do NOT implement anything yet — only produce the plan.\n\n`;
+        `## Plan First\n\n` +
+        `This issue requires a plan before implementation. You MUST spawn a plan run using ` +
+        `symphony spawn-plan-run-and-handoff (or the MCP tool) before writing any code.\n\n` +
+        `1. Analyze the issue and break it into clear phases\n` +
+        `2. Write a JavaScript plan script (issue(), parallel(), pipeline(), phase())\n` +
+        `3. Call symphony spawn-plan-run-and-handoff --script plan.js\n` +
+        `4. The plan will be dry-run, approved, and executed automatically\n\n` +
+        `Do NOT implement anything yet — spawn the plan first.\n\n`;
     }
   }
-
-  // Override goal for planning mode
-  const isPlanning = opts.tracker && opts.issueUuid
-    ? opts.tracker.getIssue(opts.issueUuid)?.state === "planning"
-    : false;
 
   // Inject goal if present
   if (opts.goal?.condition) {
     const mode = opts.goal.inject_mode ?? "prefix";
     if (mode === "prefix") {
-      const goalCondition = isPlanning
-        ? "Submit a detailed implementation plan using symphony.submit_plan, then call symphony.session_completed"
-        : opts.goal.condition;
-      prefix += `/goal ${goalCondition}\n\n`;
+      prefix += `/goal ${opts.goal.condition}\n\n`;
     }
   }
 

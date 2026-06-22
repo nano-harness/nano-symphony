@@ -1,5 +1,7 @@
 /** Adapter-specific config derived from the workflow agent section. */
 export interface AgentAdapterConfig {
+  /** Transport protocol used by the agent to call Symphony. */
+  transport?: "cli" | "mcp";
   permission_mode?: string;
   permissions?: {
     allow?: string[];

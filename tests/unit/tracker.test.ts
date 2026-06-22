@@ -65,6 +65,26 @@ describe("tracker", () => {
     expect(a.identifier).toBe(`TASK-${a.id}`);
     expect(b.identifier).toBe(`TASK-${b.id}`);
   });
+  test("insertIssue persists custom identifier and supports lookup by identifier", () => {
+    const issue = tracker.insertIssue({ uuid: "uuid-custom", identifier: "CUSTOM-42", title: "Custom", state: "todo" });
+    expect(issue.identifier).toBe("CUSTOM-42");
+    const byIdentifier = tracker.getIssueByIdentifier("CUSTOM-42");
+    expect(byIdentifier).not.toBeNull();
+    expect(byIdentifier!.uuid).toBe(issue.uuid);
+  });
+  test("updateIssue preserves identifier when not provided", () => {
+    const issue = tracker.insertIssue({ uuid: "uuid-preserve", title: "Original", state: "todo" });
+    const updated = tracker.updateIssue(issue.uuid, { title: "Updated", state: "todo" });
+    expect(updated).not.toBeNull();
+    expect(updated!.identifier).toBe(issue.identifier);
+  });
+  test("updateIssue updates identifier when provided", () => {
+    const issue = tracker.insertIssue({ uuid: "uuid-update-id", title: "Original", state: "todo" });
+    const updated = tracker.updateIssue(issue.uuid, { identifier: "UPDATED-1", title: "Original", state: "todo" });
+    expect(updated).not.toBeNull();
+    expect(updated!.identifier).toBe("UPDATED-1");
+    expect(tracker.getIssueByIdentifier("UPDATED-1")).not.toBeNull();
+  });
   test("insertBlocker adds blockers to getIssue", () => {
     const issue1 = tracker.insertIssue({ uuid: "uuid-1", title: "Issue A", state: "todo" });
     const issue2 = tracker.insertIssue({ uuid: "uuid-2", title: "Issue B", state: "backlog" });

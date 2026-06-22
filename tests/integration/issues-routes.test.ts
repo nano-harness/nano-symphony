@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { Database } from "bun:sqlite";
 import { runMigrations } from "../../src/db/migrations.ts";
 import { createTracker } from "../../src/db/tracker.ts";
-import { createRoutes } from "../../src/http/routes.ts";
+import { createRoutes } from "../../src/http/routes/index.ts";
 
 function makeApp() {
   const db = new Database(":memory:");
@@ -35,14 +35,14 @@ describe("issues routes - null tolerance", () => {
     expect(body.identifier).toMatch(/^TASK-\d+$/);
   });
 
-  test("POST with identifier field should be rejected with 400", async () => {
+  test("POST with identifier field should accept and persist custom identifier", async () => {
     const { app } = makeApp();
     const res = await app.request("/issues", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        identifier: "NULL-1",
-        title: "Test null fields",
+        identifier: "CUSTOM-1",
+        title: "Test custom identifier",
         priority: "medium",
         state: "todo",
         description: null,
@@ -51,7 +51,9 @@ describe("issues routes - null tolerance", () => {
       }),
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.identifier).toBe("CUSTOM-1");
   });
 
   test("POST with description and workspace_path as null should succeed when no identifier", async () => {
@@ -150,7 +152,7 @@ describe("issues routes - null tolerance", () => {
     expect(body.uuid).toBe(issue.uuid);
   });
 
-  test("PUT attempting to change identifier should fail with 400", async () => {
+  test("PUT attempting to change identifier should update identifier", async () => {
     const { app, tracker } = makeApp();
     const issue = tracker.insertIssue({
       uuid: "test-uuid-2",
@@ -164,11 +166,13 @@ describe("issues routes - null tolerance", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        identifier: "OTHER-1", // This should be rejected by .strict()
+        identifier: "OTHER-1",
       }),
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.identifier).toBe("OTHER-1");
   });
 
   test("PUT with invalid state should fail with 400", async () => {

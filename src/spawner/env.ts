@@ -2,9 +2,6 @@
 const SYMPHONY_INTERNAL_KEYS = new Set([
   'API_TOKEN',           // symphony server admin API token
   'SYMPHONY_API_TOKEN',  // same (prefixed form)
-  'DATABASE_URL',        // DB connection string
-  'SYMPHONY_DB_PATH',    // SQLite path
-  'JWT_SECRET',          // JWT signing secret
 ]);
 
 // Parent Claude Code session variables — must not leak to child agent processes to avoid session identity conflicts.

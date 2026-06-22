@@ -26,6 +26,7 @@ export interface AgentDefaults {
 
 export interface AgentRoleProfile extends AgentDefaults {
   extra_env?: Record<string, string>;
+  transport?: "cli" | "mcp";
   permission_mode?: string;
   permissions?: {
     allow?: string[];

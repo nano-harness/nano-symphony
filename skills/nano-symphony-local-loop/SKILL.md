@@ -86,7 +86,6 @@ curl -X POST http://localhost:4123/api/v1/issues \
   -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "identifier": "DEMO-1",
     "title": "echo hello world",
     "description": "Print hello world and exit successfully",
     "priority": "medium",
@@ -170,6 +169,8 @@ graph LR
 
 **Completion signal priority:** MCP `session_completed` semantics override stdout payload; exit code is used for cross-validation (success + non-zero exit = downgrade to needs_retry).
 
+**Agent integration styles:** Agents report completion through the `symphony` CLI by default (`symphony fetch-issue`, `symphony emit-result`, `symphony session-completed`). This is the recommended path because it works in every runtime. MCP JSON-RPC is only used when the runtime cannot execute shell commands. Set `agent.transport: cli` (default) to ensure no MCP config is injected; use `mcp` or `auto` only when the agent needs the MCP config.
+
 **Output directory:** Agent artifacts are written to `<workspace>/.nano-out/` (contains `result.json` and `solution.patch` for nano agent).
 
 ## Claude Code Agent
@@ -181,7 +182,6 @@ curl -X POST http://localhost:4123/api/v1/issues \
   -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "identifier": "DEMO-2",
     "title": "add a hello function",
     "description": "Add a hello() function to main.ts",
     "priority": "medium",
@@ -308,7 +308,6 @@ curl -X POST http://localhost:4123/api/v1/issues \
   -H "X-Symphony-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "identifier": "DEMO-1",
     "title": "echo hello",
     "description": "Just say hi and exit",
     "priority": "medium",

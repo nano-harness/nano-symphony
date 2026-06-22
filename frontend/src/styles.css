@@ -2813,3 +2813,86 @@ a:hover {
   color: var(--paper-dim);
   font-family: var(--mono);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Event timeline enhancements
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.event-attempt-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 8px;
+  list-style: none;
+}
+
+.event-attempt-header:first-child {
+  margin-top: 0;
+}
+
+.event-attempt-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mute-2);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.event-attempt-line {
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.event-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.event-delta {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--mute);
+}
+
+.event-delta.warm {
+  color: var(--ember);
+}
+
+.event-delta.hot {
+  color: var(--signal-red);
+  font-weight: 600;
+}
+
+.tool-pair {
+  border-left: 3px solid var(--signal-blue);
+}
+
+.tool-pair.tool-error {
+  border-left-color: var(--signal-red);
+}
+
+.tool-pair-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--paper);
+  margin-bottom: 6px;
+}
+
+.tool-pair-duration {
+  font-size: 11px;
+  color: var(--mute);
+}
+
+.tool-result-divider {
+  height: 1px;
+  background: var(--rule);
+  margin: 10px 0;
+}

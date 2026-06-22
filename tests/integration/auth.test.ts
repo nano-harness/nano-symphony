@@ -18,11 +18,11 @@ function makeApp(apiToken?: string) {
   return app;
 }
 
-describe("S1: Control plane authentication", () => {
+describe("Control plane authentication", () => {
   test("without explicit token configured — auth is still enforced (auto-generated token)", async () => {
     const app = makeApp(undefined);
     const res = await app.request("/api/v1/issues", { method: "GET" });
-    // S1: control plane now always enforces auth regardless of whether
+    // control plane now always enforces auth regardless of whether
     // an explicit token was provided. An auto-generated token is used,
     // so unauthenticated requests must get 401.
     expect(res.status).toBe(401);
@@ -92,8 +92,8 @@ describe("S1: Control plane authentication", () => {
   });
 });
 
-describe("S2: Removed privileged API fields", () => {
-  test("POST /api/v1/issues rejects agent_binary field (.strict())", async () => {
+describe("Privileged API fields", () => {
+  test("POST /api/v1/issues rejects id and uuid fields", async () => {
     const app = makeApp(VALID_TOKEN);
     const res = await app.request("/api/v1/issues", {
       method: "POST",
@@ -102,16 +102,34 @@ describe("S2: Removed privileged API fields", () => {
         "X-Symphony-Token": VALID_TOKEN,
       },
       body: JSON.stringify({
-        title: "S2 test",
+        id: 123,
+        title: "test",
         state: "todo",
-        agent_binary: "/evil/rm",
       }),
     });
-    // IssueCreateSchema now has .strict() — unknown fields are rejected
     expect(res.status).toBe(400);
   });
 
-  test("PUT /api/v1/issues/:id rejects agent_binary due to .strict()", async () => {
+  test("POST /api/v1/issues accepts agent_binary override", async () => {
+    const app = makeApp(VALID_TOKEN);
+    const res = await app.request("/api/v1/issues", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Symphony-Token": VALID_TOKEN,
+      },
+      body: JSON.stringify({
+        title: "test",
+        state: "todo",
+        agent_binary: "nano",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.agent_binary).toBe("nano");
+  });
+
+  test("PUT /api/v1/issues/:id accepts agent_binary override", async () => {
     const app = makeApp(VALID_TOKEN);
     // Create issue first
     const create = await app.request("/api/v1/issues", {
@@ -120,7 +138,7 @@ describe("S2: Removed privileged API fields", () => {
         "Content-Type": "application/json",
         "X-Symphony-Token": VALID_TOKEN,
       },
-      body: JSON.stringify({ title: "S2 update test", state: "todo" }),
+      body: JSON.stringify({ title: "update test", state: "todo" }),
     });
     expect(create.status).toBe(201);
     const issue = await create.json();
@@ -131,9 +149,11 @@ describe("S2: Removed privileged API fields", () => {
         "Content-Type": "application/json",
         "X-Symphony-Token": VALID_TOKEN,
       },
-      body: JSON.stringify({ agent_binary: "/evil/rm" }),
+      body: JSON.stringify({ agent_binary: "nano" }),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.agent_binary).toBe("nano");
   });
 
   test("PUT /api/v1/issues/:id rejects sandbox_mode due to .strict()", async () => {
@@ -144,7 +164,7 @@ describe("S2: Removed privileged API fields", () => {
         "Content-Type": "application/json",
         "X-Symphony-Token": VALID_TOKEN,
       },
-      body: JSON.stringify({ title: "S2 sandbox_mode test", state: "todo" }),
+      body: JSON.stringify({ title: "sandbox_mode test", state: "todo" }),
     });
     const issue = await create.json();
 
@@ -167,7 +187,7 @@ describe("S2: Removed privileged API fields", () => {
         "Content-Type": "application/json",
         "X-Symphony-Token": VALID_TOKEN,
       },
-      body: JSON.stringify({ title: "S2 writable paths test", state: "todo" }),
+      body: JSON.stringify({ title: "writable paths test", state: "todo" }),
     });
     const issue = await create.json();
 

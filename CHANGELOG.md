@@ -5,7 +5,36 @@ All notable changes to nano-symphony will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.6] - 2026-06-23
+
+### Added
+- **Structured event timeline**: `frontend/src/EventTimeline.tsx` groups `tool_call`/`tool_result` pairs, shows attempt separators, and highlights deltas >10s (warm) and >30s (hot).
+- **Claude Code tool_result events**: `src/spawner/adapters/claude-code.ts` now parses `tool_result` stream-json lines so the dashboard shows complete tool call pairs.
+- **Regression tests**: `tests/unit/install-wrapper.test.ts`, `tests/unit/claude-code-adapter.test.ts`, and `frontend/src/__tests__/EventTimeline.vitest.tsx`.
+
+### Fixed
+- **Wrapper `report-event --kind`**: the generated `symphony` wrapper now accepts both `--kind progress` and `--kind=progress` (and the same for `--message`, `--payload-json`).
+- **`emit-result` structured data**: `--data-json` values that are already valid JSON are embedded directly instead of being double-stringified; plain text still falls back to JSON-string wrapping.
+- **`Abort trap: 6` stderr noise**: `print_json` now uses `python3 -m json.tool` instead of a `node -e` pipeline that produced SIGABRT chatter.
+- **`emit_result` server error handling**: malformed stored `expected_schema` no longer triggers a raw 500; the handler returns a clear validation error.
+- **IssueDetail live refresh**: SSE now refreshes issue/run state for all substantive events, not just `retrigger_requested`.
+
+### Changed
+- **WORKFLOW template**: `templates/WORKFLOW.example.md` and `WORKFLOW.md` now include a `## Mandatory startup sequence` that requires `symphony fetch-issue` as the first action.
+- **Skill docs**: `skills/nano-symphony/SKILL.md` documents the fixed `report-event` syntax, `emit-result` JSON-object support, and the mandatory startup sequence.
+
+## [0.9.5] - 2026-06-16
+
+### Added
+- **Community files**: `AGENTS.md`, `CONTRIBUTING.md`, and `CODE_OF_CONDUCT.md`.
+- **Regression tests**: `tests/unit/config.test.ts` covers empty `API_TOKEN`, non-loopback `HOST` without token, and empty `apiToken` option in `createHttpServer`.
+
+### Fixed
+- **HTTP auth**: `createHttpServer` now rejects an empty `apiToken` option; requests with an empty token are treated as unauthenticated instead of bypassing auth.
+- **Issue identifiers**: `insertIssue` persists a generated `TASK-N` identifier to the database, and `updateIssue` preserves the existing identifier when not provided.
+
+### Changed
+- **Documentation**: `docs/WORKFLOW-INTERNALS.md`, `docs/WORKFLOW-reference.md`, and `docs/adr/001-multi-agent-roles-and-shared-contract.md` updated to reflect git-diff artifact collection and the generic nano-agent orchestrator contract.
 
 ### Breaking Changes — Schema Redesign (requires manual DB wipe before upgrade)
 

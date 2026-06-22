@@ -30,6 +30,8 @@ export const WorkflowSchema = z.object({
     timeout_ms: z.number().default(3600000),
     max_retries: z.number().default(3),
     extra_env: z.record(z.string()).optional().default({}),
+    /** Transport protocol used by the agent to call Symphony. */
+    transport: z.enum(["cli", "mcp"]).default("cli"),
     permission_mode: z.string().optional(),
     permissions: z.object({
       allow: z.array(z.string()).optional(),
@@ -53,6 +55,7 @@ export const WorkflowSchema = z.object({
       timeout_ms: z.number().optional(),
       max_retries: z.number().optional(),
       extra_env: z.record(z.string()).optional(),
+      transport: z.enum(["cli", "mcp"]).optional(),
       permission_mode: z.string().optional(),
       permissions: z.object({
         allow: z.array(z.string()).optional(),
@@ -66,19 +69,7 @@ export const WorkflowSchema = z.object({
       trusted_binaries: z.array(z.string()).optional(),
       hooks: z.record(z.unknown()).optional(),
     }).passthrough()).optional(),
-    /**
-     * @deprecated Planning mode has been replaced by plan-run (spawn_plan_run / spawn_plan_run_and_handoff).
-     * This field is ignored and will be removed in a future version.
-     */
-    planning: z.object({
-      enabled: z.boolean().default(false),
-      skip_labels: z.array(z.string()).default([]),
-      auto_approve_on_low: z.boolean().default(false),
-      planning_timeout_ms: z.number().default(86400000),
-      max_plan_revisions: z.number().default(3),
-      template: z.string().optional(),
-    }).optional(),
-	  }).passthrough().optional(),
+  }).passthrough().optional(),
   goal: z.object({
     condition: z.string().min(1),
     max_turns: z.number().int().positive().default(50),

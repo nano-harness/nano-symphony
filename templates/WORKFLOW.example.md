@@ -45,6 +45,17 @@ goal:
   inject_mode: prefix
   abort_on_max_turns: true
 ---
+
+## Mandatory startup sequence
+
+Execute these steps IN ORDER before any other action:
+
+1. `symphony fetch-issue` — understand your task.
+2. Review the issue details and plan your approach.
+3. Begin work.
+
+Do NOT call `discover_skills` or any other tool before `fetch-issue`.
+
 # Issue: {{ issue.identifier }} - {{ issue.title }}
 {{ issue.description }}
 Attempt: {{ attempt }}

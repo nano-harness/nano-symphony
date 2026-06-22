@@ -2,7 +2,8 @@ import { z } from "zod";
 import path from "path";
 import { AgentResultSummarySchema, parseLastJsonLine } from "../agent-result-payload.ts";
 import type { AgentResultSummary, AgentArtifacts } from "../agent-result-payload.ts";
-import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation } from "../agent-adapter.ts";
+import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation, isMcpTransport } from "../agent-adapter.ts";
+import { renderEnvFile, renderMcpJson } from "../cli-files.ts";
 import type { SpawnContext } from "../types.ts";
 
 // Design decisions (per plan §4.3):
@@ -35,24 +36,6 @@ When you have completed the task, output your final result as a SINGLE LINE of v
 Only include fields you have values for. The JSON must be on one line with no surrounding text.
 `;
 
-function renderMcpJson(ctx: SpawnContext): string {
-  return JSON.stringify({
-    mcpServers: {
-      symphony: {
-        type: "http",
-        url: ctx.mcpUrl,
-        headers: {
-          "X-Symphony-Token": ctx.token,
-        },
-      },
-    },
-  }, null, 2);
-}
-
-function renderClaudeSettings(): string {
-  return JSON.stringify({}, null, 2);
-}
-
 function renderSystemPromptAppend(): string {
   return SYSTEM_PROMPT_SUFFIX.trim() + "\n";
 }
@@ -61,25 +44,28 @@ export const claudeCodeAdapter: AgentAdapter = {
   kind: "claude-code",
 
   renderWorkspaceFiles(ctx: SpawnContext): WorkspaceFile[] {
-    return [
-      {
-        path: ".mcp.json",
-        contents: renderMcpJson(ctx),
-        // S1: Restrict to owner-only so adjacent users on a shared NFS workspace
-        // cannot read the per-session MCP token.
-        mode: 0o600,
-      },
+    const files: WorkspaceFile[] = [
       {
         path: ".claude/append-system-prompt.md",
         contents: renderSystemPromptAppend(),
         mode: 0o644,
       },
-      {
-        path: ".claude/settings.local.json",
-        contents: renderClaudeSettings(),
-        mode: 0o644,
-      },
     ];
+    if (isMcpTransport(ctx.config)) {
+      files.push({
+        path: ".mcp.json",
+        contents: renderMcpJson(ctx),
+        // Restrict to owner-only so adjacent users on a shared NFS workspace
+        // cannot read the per-session MCP token.
+        mode: 0o600,
+      });
+    } else {
+      // CLI mode: hide MCP credentials from the agent process by writing them to
+      // .symphony/env. The global `symphony` wrapper searches upward from $PWD
+      // to load this file; no workspace-local wrapper binary is needed.
+      files.push({ path: ".symphony/env", contents: renderEnvFile(ctx), mode: 0o600 });
+    }
+    return files;
   },
 
   buildSpawnInvocation(ctx: SpawnContext): SpawnInvocation {
@@ -88,9 +74,8 @@ export const claudeCodeAdapter: AgentAdapter = {
       "--output-format", "stream-json",
       "--verbose",
       "--append-system-prompt-file", path.join(ctx.workspace, ".claude", "append-system-prompt.md"),
-      "--mcp-config", path.join(ctx.workspace, ".mcp.json"),
+      ...(isMcpTransport(ctx.config) ? ["--mcp-config", path.join(ctx.workspace, ".mcp.json")] : []),
       "--permission-mode", ctx.config.permission_mode ?? "auto",
-      "--allowedTools", "symphony.*",
       ...(ctx.config.permissions?.allow ?? []).flatMap(r => ["--allowedTools", r]),
       ...(ctx.config.permissions?.deny ?? []).flatMap(r => ["--disallowedTools", r]),
       ...(ctx.config.sandbox?.extra_writable_paths ?? []).flatMap(p => ["--add-dir", p]),
@@ -98,6 +83,11 @@ export const claudeCodeAdapter: AgentAdapter = {
     const env: Record<string, string> = {
       SYMPHONY_ISSUE_UUID: ctx.issueUuid,
       SYMPHONY_WORKSPACE: ctx.workspace,
+      // CLI mode: hide the MCP endpoint credentials from the agent process so
+      // claude cannot auto-discover the symphony MCP server. The `symphony`
+      // wrapper reads them from .symphony/env instead.
+      ...(isMcpTransport(ctx.config) ? {} : { SYMPHONY_MCP_URL: "", SYMPHONY_TOKEN: "" }),
+      SYMPHONY_TRANSPORT: ctx.config.transport ?? "cli",
     };
     return { argv, env };
   },
@@ -177,6 +167,18 @@ export const claudeCodeAdapter: AgentAdapter = {
           kind: "tool_call",
           message: `Tool: ${name}`,
           payload: { tool: name, input: obj.input },
+        };
+      }
+
+      // Emit events for tool results so the timeline shows call/result pairs
+      if (type === "tool_result") {
+        const name = (obj.name as string) ?? "unknown_tool";
+        const output = obj.output ?? obj.result ?? "";
+        const isError = obj.is_error === true;
+        return {
+          kind: "tool_result",
+          message: isError ? `Tool result (error): ${name}` : `Tool result: ${name}`,
+          payload: { tool: name, output, is_error: isError },
         };
       }
 

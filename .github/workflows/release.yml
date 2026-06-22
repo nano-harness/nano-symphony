@@ -26,7 +26,7 @@ jobs:
       - name: Run backend tests
         run: bun test tests/
       - name: Run frontend tests
-        run: cd frontend && npm run test
+        run: cd frontend && bun run test
 
   build:
     name: Build bundle

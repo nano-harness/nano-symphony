@@ -111,3 +111,30 @@ bun scripts/validate-plan.ts path/to/plan.js
 
 (Not yet implemented — for now you can dry-run by creating the plan run and
 approving the dry-run summary in the dashboard.)
+
+## Dispatching plans
+
+Plan scripts are dispatched via the **Symphony CLI** or the MCP tools.
+
+### CLI (recommended)
+
+```bash
+# Spawn a plan run and continue independently
+symphony spawn-plan-run --script plan.js
+
+# Spawn a plan run and pause the current issue until it completes
+symphony spawn-plan-run-and-handoff --script plan.js
+```
+
+The CLI reads `SYMPHONY_MCP_URL` and `SYMPHONY_TOKEN` automatically.
+
+### MCP tool
+
+If the agent only supports MCP tools, use `symphony.spawn_plan_run_and_handoff`:
+
+```
+symphony.spawn_plan_run_and_handoff({ script: `...plan source...` })
+```
+
+Both approaches record a `plan_run_spawned` event and transition the issue to
+`awaiting_plan` while the plan runtime executes.

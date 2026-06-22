@@ -5,7 +5,7 @@ import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
 import { PlanReviewPanel } from "./PlanReviewPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
-import { EventBody } from "./EventBody";
+import { EventTimeline } from "./EventTimeline";
 import { LogViewer } from "./LogViewer";
 import { PlanRunCreator } from "./PlanRunCreator";
 
@@ -90,8 +90,22 @@ export function IssueDetail() {
           if (event.kind === "comment_added" || event.kind === "comment_deleted") {
             api.listComments(params.uuid).then(setComments).catch(() => {});
           }
-          // Refresh issue on retrigger
-          if (event.kind === "retrigger_requested") {
+          // Refresh issue/run state for any substantive event so the dashboard stays live
+          if ([
+            "started",
+            "completed",
+            "handoff",
+            "abandoned",
+            "retry_scheduled",
+            "retrigger_requested",
+            "state_transition_suggested",
+            "result_emitted",
+            "budget_exceeded",
+            "plan_guard",
+            "plan_run_spawned",
+            "artifacts_collected",
+            "semantics_override_rejected",
+          ].includes(event.kind)) {
             refreshIssueAndRun();
           }
         }
@@ -253,15 +267,6 @@ export function IssueDetail() {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  const tryParsePayload = (payloadJson: string | null) => {
-    if (!payloadJson) return null;
-    try {
-      return JSON.parse(payloadJson);
-    } catch {
-      return null;
-    }
   };
 
   const planProgress = createMemo(() => {
@@ -700,25 +705,7 @@ export function IssueDetail() {
                 <p style="color: var(--mute); font-size: 13px;">No events recorded yet.</p>
               </Show>
               <Show when={events().length > 0}>
-                <ul class="events-list">
-                  <For each={events()}>
-                    {(event) => {
-                      const payload = tryParsePayload(event.payload_json);
-                      return (
-                        <li class="event-card">
-                          <div class="event-header">
-                            <span class="event-kind">{event.kind}</span>
-                            <span class="event-time">{formatTime(event.ts)}</span>
-                          </div>
-                          <div class="event-message">{event.message}</div>
-                          <Show when={payload}>
-                            <EventBody kind={event.kind} payload={payload} />
-                          </Show>
-                        </li>
-                      );
-                    }}
-                  </For>
-                </ul>
+                <EventTimeline events={events()} />
               </Show>
             </div>
           </div>

@@ -1,8 +1,19 @@
 import { Hono } from "hono";
+import { readFileSync } from "fs";
 import { verifyToken } from "./auth.ts";
 import { handleTool, TOOL_DEFINITIONS } from "./tools.ts";
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
+
+// Read version from package.json so the MCP serverInfo stays in sync with releases.
+const PACKAGE_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(`${import.meta.dir}/../../package.json`, "utf-8")) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 export function createMcpRouter(
   tracker: Tracker,
@@ -26,7 +37,7 @@ export function createMcpRouter(
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "nano-symphony", version: "0.1.0" },
+          serverInfo: { name: "nano-symphony", version: PACKAGE_VERSION },
         },
       });
     }

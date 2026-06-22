@@ -80,9 +80,6 @@ export async function tickFinalizedPlans(tracker: Tracker, logger: Logger): Prom
   }
 }
 
-let lastExpiredCheck = 0;
-const EXPIRED_CHECK_INTERVAL_MS = 60_000;
-
 /**
  * Resume in-flight plan runs after a crash restart.
  * Called once at startup to re-attach running plans without waiting
@@ -102,9 +99,6 @@ export async function resumeRunningPlans(tracker: Tracker, logger: Logger): Prom
 
 export async function tickExpiredPlans(tracker: Tracker, logger: Logger): Promise<void> {
   const now = Date.now();
-  if (now - lastExpiredCheck < EXPIRED_CHECK_INTERVAL_MS) return;
-  lastExpiredCheck = now;
-
   const expired = tracker.listExpiredRunningPlanRuns(now);
   for (const run of expired) {
     logger.warn({ runId: run.id }, "Plan run wall time exceeded, cancelling");

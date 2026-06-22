@@ -83,6 +83,18 @@ export function createIssueOps(db: Database) {
     DELETE FROM symphony_artifacts WHERE issue_uuid = ?
   `);
 
+  const deleteIssueResultsStmt = db.prepare(`
+    DELETE FROM issue_results WHERE issue_uuid = ?
+  `);
+
+  const deleteIssueLlmCallsStmt = db.prepare(`
+    DELETE FROM llm_calls WHERE issue_uuid = ?
+  `);
+
+  const deleteIssueMetricsStmt = db.prepare(`
+    DELETE FROM issue_metrics WHERE issue_uuid = ?
+  `);
+
   const getIssueBaseStmt = db.prepare(`
     SELECT * FROM issues WHERE uuid = ?
   `);
@@ -240,7 +252,7 @@ export function createIssueOps(db: Database) {
   function insertIssue(issue: IssueInput): Issue {
     const now = new Date().toISOString();
     const requirePlan = issue.require_plan === true ? 1 : issue.require_plan === false ? 0 : null;
-    insertIssueStmt.run(
+    const result = insertIssueStmt.run(
       issue.uuid,
       issue.identifier ?? null,
       issue.title,
@@ -265,6 +277,12 @@ export function createIssueOps(db: Database) {
       (issue as { created_at?: string }).created_at ?? now,
       (issue as { updated_at?: string }).updated_at ?? now,
     );
+    // Persist a generated identifier if the caller did not supply one. SQLite has assigned
+    // the rowid by now, so we can materialize the readable TASK-N form in the database.
+    if (!issue.identifier) {
+      const generated = `TASK-${result.lastInsertRowid}`;
+      db.prepare("UPDATE issues SET identifier = ? WHERE uuid = ?").run(generated, issue.uuid);
+    }
     deleteLabelStmt.run(issue.uuid);
     for (const label of issue.labels ?? []) {
       insertLabelStmt.run(issue.uuid, label);
@@ -275,11 +293,12 @@ export function createIssueOps(db: Database) {
   }
 
   function updateIssue(uuid: string, patch: Omit<IssueInput, "uuid"> & { updated_at?: string }): Issue | null {
-    if (!getIssueBaseStmt.get(uuid)) return null;
+    const existing = getIssue(uuid);
+    if (!existing) return null;
     const now = new Date().toISOString();
     const requirePlan = patch.require_plan === true ? 1 : patch.require_plan === false ? 0 : null;
     updateIssueStmt.run(
-      patch.identifier ?? null,
+      patch.identifier !== undefined ? patch.identifier : existing.identifier,
       patch.title,
       patch.description ?? null,
       patch.priority ?? "medium",
@@ -388,14 +407,17 @@ export function createIssueOps(db: Database) {
       wsRow?.workspace_path
         ? { path: wsRow.workspace_path, managed: wsRow.workspace_managed === 1 }
         : undefined;
-    // A4: Wrap all 7-table delete in a single transaction to prevent orphaned
-    // rows if the process is interrupted mid-delete.
+    // Wrap all dependent-table deletes in a single transaction to prevent
+    // orphaned rows if the process is interrupted mid-delete.
     const deleteAll = db.transaction(() => {
       deleteLabelStmt.run(uuid);
       deleteIssueBlockersStmt.run(uuid, uuid);
       deleteIssueEventsStmt.run(uuid);
       deleteIssueCommentsStmt.run(uuid);
       deleteIssueArtifactsStmt.run(uuid);
+      deleteIssueResultsStmt.run(uuid);
+      deleteIssueLlmCallsStmt.run(uuid);
+      deleteIssueMetricsStmt.run(uuid);
       deleteIssueRunStmt.run(uuid);
       deleteIssueStmt.run(uuid);
     });

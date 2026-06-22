@@ -1,11 +1,11 @@
 ---
 name: nano-symphony
-description: Use this skill when operating inside a nano-symphony orchestrated workspace to fetch the assigned issue, report progress, and mark the session complete through the Symphony MCP tools.
+description: Use this skill when operating inside a nano-symphony orchestrated workspace. Default to the symphony CLI; use MCP tools only when the runtime cannot execute shell commands.
 ---
 
 # nano-symphony
 
-You are operating inside a nano-symphony orchestrated workspace. This skill documents the expected agent workflow and the Symphony MCP tools available in this environment.
+You are operating inside a nano-symphony orchestrated workspace. This skill documents the expected agent workflow. **Default to the `symphony` CLI**; the MCP tools are only a fallback for runtimes that cannot spawn shell processes.
 
 ## Installation
 
@@ -29,12 +29,22 @@ For manual setup, download the latest archive from:
 
 ## When to use this skill
 
-Use this skill whenever the workspace has been prepared by nano-symphony and you need to work on the current orchestration issue. The environment typically provides:
+Use this skill whenever the workspace has been prepared by nano-symphony and you need to work on the current orchestration issue. In CLI mode the agent environment only exposes:
 
-- `SYMPHONY_ISSUE_ID` - The current issue or task identifier.
+- `SYMPHONY_ISSUE_UUID` - The current issue UUID.
 - `SYMPHONY_WORKSPACE` - The workspace path for this run.
-- `SYMPHONY_MCP_URL` - The Symphony MCP endpoint.
-- `SYMPHONY_TOKEN` - The token used by the configured MCP server.
+
+The MCP endpoint and token are written to `.symphony/env` and loaded by the `symphony` wrapper, so the agent cannot accidentally connect to the MCP server directly.
+
+## CLI-first integration (default)
+
+**Always prefer the `symphony` CLI.** The global wrapper searches upward from the current directory to find `.symphony/env`, loads the per-issue credentials, and forwards commands to the local Symphony MCP endpoint. The agent process itself does **not** see `SYMPHONY_MCP_URL` or `SYMPHONY_TOKEN` in its environment, which prevents accidental MCP auto-discovery.
+
+Use the MCP JSON-RPC tools **only** when:
+- The runtime cannot spawn shell processes, **and**
+- A native MCP client is available.
+
+The default `agent.transport` is `cli`; workflows that set `agent.transport: mcp` still accept CLI commands, but `mcp` instructs Symphony to expose the MCP config to the agent. When in doubt, run `symphony <command>`.
 
 ## Agent Kinds
 
@@ -45,13 +55,31 @@ Symphony supports two agent kinds via the adapter pattern:
 
 The agent kind is determined by `agent.kind` in the workflow config, or per-issue via `agent_kind` field.
 
-## Available tools
+## Quick start (CLI)
+
+1. **Mandatory first action:** `symphony fetch-issue` (or `./.symphony/symphony fetch-issue` if `symphony` is not on PATH). Do not call any other tool before this.
+2. Review the issue details and plan your approach.
+3. Do the work requested in the issue.
+4. Emit a result: `symphony emit-result --data-json '<JSON>'` (or `--data-json='<JSON>'`). Valid JSON objects/arrays are sent as structured data; plain text must be wrapped as a JSON string, e.g. `"summary"`.
+5. Complete the session: `symphony session-completed --semantics success --summary "<summary>"`
+
+**Do not run admin commands such as `symphony issue list` or `symphony issue get`.** They require `API_TOKEN` and will return 401 inside an agent session. Agent commands (`fetch-issue`, `emit-result`, `session-completed`, `report-event`) use the agent-scoped token auto-loaded by the wrapper.
+
+## Available commands
+
+All commands below are shown in **CLI form first**; the MCP equivalent is listed only as a fallback.
 
 ### Required (every session)
 
-- `symphony.fetch_issue` — Fetch the current issue details and orchestration context. **Call once at session start.**
-- `symphony.emit_result` — Submit a structured result before completing. **Required before `session_completed`.** See "Submitting results with emit_result" below.
-- `symphony.session_completed` — Mark the session complete. **Required before exit.** Full schema below.
+- **CLI:** `symphony fetch-issue`
+  - MCP: `symphony.fetch_issue`
+  - Fetch the current issue details and orchestration context. **Call once at session start.**
+- **CLI:** `symphony emit-result --data-json 'Created hello.txt and verified content.'`
+  - MCP: `symphony.emit_result`
+  - Submit a structured result before completing. **Required before `session_completed`.** See "Submitting results with emit_result" below.
+- **CLI:** `symphony session-completed --semantics success --summary "Task completed"`
+  - MCP: `symphony.session_completed`
+  - Mark the session complete. **Required before exit.** Full schema below.
 
 ### session_completed full schema
 
@@ -87,17 +115,34 @@ The `artifacts` array supports these discriminated types:
 
 ### Recommended (when applicable)
 
-- `symphony.report_event` — Report meaningful progress, decisions, blockers, validation results. Args: `{kind, message, payload?}`. Typical `kind` values: `progress`, `tool_call`, `validation`, `error`, `blocker`.
-- `symphony.report_goal_state` — Report your view of the `/goal` evaluator state when you have context the orchestrator doesn't. Args: `{condition?, turns_evaluated?, max_turns?, achieved_at?, last_reason?, tokens?}`.
-- `symphony.suggest_state_transition` — Propose a target state (`{suggested_state, reason}`). Advisory — symphony routes based on `state_transitions` config.
-- `symphony.request_workflow_section` — Fetch a specific section of the workflow Markdown by name (`{section?}`). Use when you need extra guidance not in the initial prompt.
-- `symphony.get_artifact` — Read a stored artifact. Args: `{artifact_id, mode?, lines?, bytes?, pattern?}`. Modes: `full` | `head` | `tail` | `search`.
-- `symphony.update_issue_scratchpad` — Persist a short memo (≤4 KB) for the next invocation. Args: `{text}`. Useful when you will be re-scheduled after a plan run completes.
+- **CLI:** `symphony report-event --kind progress --message "Implemented user login endpoint"`
+  - MCP: `symphony.report_event`
+  - Report meaningful progress, decisions, blockers, validation results. Typical `kind` values: `progress`, `tool_call`, `validation`, `error`, `blocker`.
+  - Both `--kind progress` and `--kind=progress` are accepted.
+- **CLI:** `symphony report-goal-state --last-reason "hello.txt created and verified"`
+  - MCP: `symphony.report_goal_state`
+  - Report your view of the `/goal` evaluator state.
+- **CLI:** `symphony suggest-state-transition --state in_review --reason "Ready for human review"`
+  - MCP: `symphony.suggest_state_transition`
+  - Propose a target state. Advisory — symphony routes based on `state_transitions` config.
+- **CLI:** `symphony request-workflow-section --section "Testing guidelines"`
+  - MCP: `symphony.request_workflow_section`
+  - Fetch a specific section of the workflow Markdown by name.
+- **CLI:** `symphony get-artifact --artifact-id <id> --mode tail --lines 50`
+  - MCP: `symphony.get_artifact`
+  - Read a stored artifact. Modes: `full` | `head` | `tail` | `search`.
+- **CLI:** `symphony update-issue-scratchpad --text "Continue from module B refactor"`
+  - MCP: `symphony.update_issue_scratchpad`
+  - Persist a short memo (≤4 KB) for the next invocation.
 
 ### Plan runs
 
-- `symphony.spawn_plan_run` — Dispatch a JS plan script and continue independently. Args: `{script, args?}`. Returns `run_id`. Fire-and-forget.
-- `symphony.spawn_plan_run_and_handoff` — Dispatch a JS plan script and pause this issue until the run completes. When the plan finishes, this issue is re-scheduled with the plan result injected into the prompt. Args: `{script, args?}`.
+- **CLI:** `symphony spawn-plan-run --script plan.js --meta-json '{"name":"Refactor auth","max_issues":5}'`
+  - MCP: `symphony.spawn_plan_run`
+  - Dispatch a JS plan script and continue independently. Returns `run_id`. Fire-and-forget.
+- **CLI:** `symphony spawn-plan-run-and-handoff --script plan.js --meta-json '{"name":"Refactor auth","max_issues":5}'`
+  - MCP: `symphony.spawn_plan_run_and_handoff`
+  - Dispatch a JS plan script and pause this issue until the plan completes.
 
 ## Submitting results with emit_result
 
@@ -107,15 +152,27 @@ Every issue **must** call `symphony.emit_result` before `session_completed`. Thi
   - If validation fails, you may retry in the same session: call `emit_result` again with a corrected `data`.
 - If there is no `<output_schema>`, pass a plain string (≤ 32 KB) summarising the outcome.
 
-```
-// With schema
+```bash
+# CLI: string result (wrap plain text as a JSON string)
+symphony emit-result --data-json '"Refactored authentication module. Tests pass."'
+
+# CLI: structured JSON result (sent as-is, preferred when an output_schema is present)
+symphony emit-result --data-json '{"summary":"...","files_changed":3}'
+
+# MCP fallback: with schema
 symphony.emit_result({ data: { summary: "...", files_changed: 3 } })
 
-// Without schema
+# MCP fallback: without schema
 symphony.emit_result({ data: "Refactored authentication module. Tests pass." })
 ```
 
 Always call `emit_result` **before** `session_completed`.
+
+## Mandatory plan requirement
+
+If the issue has `require_plan: true`, you **MUST** spawn a plan run before implementing anything. The prompt will include a `## Plan First` instruction. Failing to spawn a plan will trigger a retry.
+
+Use `symphony spawn-plan-run-and-handoff` to dispatch the plan script and pause this issue until the plan completes. After the plan finishes, you will be re-scheduled with the results injected into the prompt.
 
 ## Decomposing tasks with plans
 
@@ -205,7 +262,7 @@ config change.
 
 ## Required workflow
 
-1. Fetch the current issue before making changes so you understand the requested outcome and any orchestration metadata.
+1. **MANDATORY FIRST ACTION — `symphony fetch-issue`**: Fetch the current issue before making any changes. Do not call `discover_skills` or any other tool before this step.
 2. Inspect the repository and identify the smallest safe change that satisfies the issue.
 3. Report progress when you complete a meaningful unit of work, hit a blocker, or finish validation.
 4. Validate changes using the repository's existing test, lint, or build commands when applicable.

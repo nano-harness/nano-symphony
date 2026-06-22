@@ -122,7 +122,7 @@ export function createOrchestrator(
         tracker.releaseIssue(staleRun.issue_uuid, "released");
         tracker.recordEvent(staleRun.issue_uuid, "stale_run_detected", `Run claimed for ${staleRun.current_attempt} turns was abandoned (no heartbeat)`, { attempt: staleRun.current_attempt });
         const issue = tracker.getIssue(staleRun.issue_uuid);
-        if (issue && (issue.state === "in_progress" || issue.state === "planning")) {
+        if (issue && (issue.state === "in_progress" || issue.state === "awaiting_plan")) {
           tracker.updateIssueState(staleRun.issue_uuid, "todo");
         }
       });
@@ -131,12 +131,6 @@ export function createOrchestrator(
 
     for (const { issueUuid, attempt } of toDispatch) {
       const claimed = tracker.withTransaction(() => {
-        const issue = tracker.getIssue(issueUuid);
-        // Auto-trigger planning mode for issues that require a plan and are still in todo
-        if (issue && issue.require_plan === true && issue.state === "todo") {
-          tracker.updateIssueState(issueUuid, "planning");
-          tracker.recordEvent(issueUuid, "planning_triggered", "Issue requires a plan — entering planning mode", { require_plan: true });
-        }
         // Configure per-run heartbeat timeout so stale detection honors the env config.
         tracker.setHeartbeatTimeout(issueUuid, config.AGENT_HEARTBEAT_TIMEOUT_MS);
         const claimed = tracker.claimIssue(issueUuid, attempt);
@@ -155,7 +149,11 @@ export function createOrchestrator(
       };
 
       void sem.acquire().then(() => {
-        return runWorker(issueUuid, attempt, ctx).finally(() => sem.release());
+        return runWorker(issueUuid, attempt, ctx)
+          .catch((err: unknown) => {
+            logger.error({ issueUuid, attempt, err }, "runWorker failed unexpectedly");
+          })
+          .finally(() => sem.release());
       });
     }
 

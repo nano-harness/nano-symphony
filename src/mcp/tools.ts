@@ -59,25 +59,6 @@ const SuggestStateTransitionSchema = z.object({
   reason: z.string().describe("Reason for transition"),
 });
 
-const PlanStepSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  description: z.string().optional(),
-  after: z.array(z.string()).optional(),
-}).passthrough();
-
-const PlanEstimatesSchema = z.object({
-  files_touched: z.number().int().min(0).optional(),
-  complexity: z.enum(["low", "medium", "high"]).optional(),
-  estimated_turns: z.number().int().min(1).optional(),
-}).passthrough();
-
-const SubmitPlanSchema = z.object({
-  markdown: z.string().min(1).max(64_000),
-  steps: z.array(PlanStepSchema).optional(),
-  estimates: PlanEstimatesSchema.optional(),
-}).strict();
-
 const MAX_PLAN_SCRIPT_SIZE = 65_536; // 64 KB
 
 // ─── Plan-run tools ───────────────────────────────────────────────────────────
@@ -164,7 +145,7 @@ const SUGGEST_TRANSITION_FORBIDDEN = new Set(["done", "cancelled"]);
 // A6: Restrict agent-driven state transitions to the non-terminal working states.
 // "backlog" is excluded because issues there are never picked up by getCandidates;
 // "done"/"cancelled" are terminal and must flow through session_completed.
-const SUGGEST_TRANSITION_ALLOWED = new Set(["todo", "in_progress", "in_review", "planning"]);
+const SUGGEST_TRANSITION_ALLOWED = new Set(["todo", "in_progress", "in_review"]);
 
 // ─── Helper: convert Zod → MCP-compatible JSON-Schema ────────────────────────
 function zodToInputSchema(schema: z.ZodType): Record<string, unknown> {
@@ -200,11 +181,6 @@ export const TOOL_DEFINITIONS = [
     name: "symphony.suggest_state_transition",
     description: "Suggests a state change for the issue.",
     inputSchema: zodToInputSchema(SuggestStateTransitionSchema),
-  },
-  {
-    name: "symphony.submit_plan",
-    description: "Submit a plan for review while keeping plan-run features available.",
-    inputSchema: zodToInputSchema(SubmitPlanSchema),
   },
   {
     name: "symphony.emit_result",
@@ -279,39 +255,8 @@ function getArtifactPath(art: ArtifactItem): string | undefined {
   return undefined;
 }
 
-function submitPlanCompat(
-  tracker: Tracker,
-  issueUuid: string,
-  markdown: string,
-  steps?: z.infer<typeof PlanStepSchema>[],
-  estimates?: z.infer<typeof PlanEstimatesSchema>
-): { ok: boolean; message?: string; error?: string; revision?: number } {
-  const issue = tracker.getIssue(issueUuid);
-  if (!issue) throw new Error(`Issue ${issueUuid} not found`);
-  if (issue.state !== "planning") {
-    return { ok: false, error: "Issue must be in planning state to submit a plan." };
-  }
-  const revision = tracker.getEventsByKind(issueUuid, "plan_submitted").length;
-  tracker.recordEvent(issueUuid, "plan_submitted", "Plan submitted", {
-    markdown,
-    steps,
-    estimates,
-    revision,
-  });
-  tracker.updateIssueState(issueUuid, "plan_review");
-  return { ok: true, message: "Plan submitted for review", revision };
-}
-
 // Plan-internal tools that plan sub-issues are forbidden from calling (no nesting).
 const PLAN_INTERNAL_FORBIDDEN = new Set(["symphony.spawn_plan_run", "symphony.spawn_plan_run_and_handoff"]);
-
-// Tools allowed when an issue is in planning state (read-only + plan submission).
-const PLANNING_ALLOWED_TOOLS = new Set([
-  "symphony.fetch_issue",
-  "symphony.report_event",
-  "symphony.submit_plan",
-  "symphony.session_completed",
-]);
 
 export async function handleTool(
   name: string,
@@ -330,15 +275,6 @@ export async function handleTool(
         `Use emit_result to return your result; the caller plan can spawn further runs.`
       );
     }
-  }
-
-  // Guard: planning mode — only allow read-only and plan-submission tools.
-  const issue = tracker.getIssue(issueUuid);
-  if (issue && issue.state === "planning" && !PLANNING_ALLOWED_TOOLS.has(name)) {
-    throw new Error(
-      `Tool '${name}' is disabled while the issue is in planning mode. ` +
-      `Only fetch_issue, report_event, submit_plan, and session_completed are available.`
-    );
   }
 
   switch (name) {
@@ -412,30 +348,32 @@ export async function handleTool(
       return { ok: true, state: target };
     }
 
-    case "symphony.submit_plan": {
-      const parsed = SubmitPlanSchema.parse(params);
-      return submitPlanCompat(tracker, issueUuid, parsed.markdown, parsed.steps, parsed.estimates);
-    }
-
     case "symphony.emit_result": {
       const parsed = EmitResultSchema.parse(params);
       const issue = tracker.getIssue(issueUuid);
       if (!issue) throw new Error(`Issue ${issueUuid} not found`);
 
-      // Validate against expected_schema if present
+      // Validate against expected_schema if present. Fail closed: if the validator
+      // cannot be loaded or run, treat it as a validation failure rather than
+      // silently accepting arbitrary data.
       let validated = 1;
       let validationError: string | undefined;
       if (issue.expected_schema) {
+        let schema: unknown;
         try {
+          schema = JSON.parse(issue.expected_schema);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          validationError = `Invalid stored output schema: ${message}`;
+          validated = 0;
+        }
+        if (schema !== undefined) {
           const { validateSchema } = await import("../plan-runtime/schema-validate.ts");
-          const result = validateSchema(JSON.parse(issue.expected_schema), parsed.data);
+          const result = validateSchema(schema, parsed.data);
           if (!result.valid) {
             validated = 0;
             validationError = result.errors?.join("; ");
           }
-        } catch (e) {
-          // schema-validate module unavailable in this context — skip validation
-          console.warn("[emit_result] schema validation unavailable:", e instanceof Error ? e.message : String(e));
         }
       }
 
@@ -581,11 +519,6 @@ export async function handleTool(
         tracker.updateLastBlockerFingerprint(issueUuid, null);
       }
 
-      const issue = tracker.getIssue(issueUuid);
-      if (parsed.semantics === "handoff" && issue?.state === "planning") {
-        return submitPlanCompat(tracker, issueUuid, parsed.summary ?? "Plan submitted");
-      }
-
       return { ok: true };
     }
 
@@ -624,10 +557,9 @@ function collectRelatedIssueUuids(tracker: Tracker, issueUuid: string, issue: No
     if (run?.caller_issue_uuid && run.caller_issue_uuid !== issueUuid) related.add(run.caller_issue_uuid);
   }
   for (const b of issue.blockers) related.add(b.blocker_uuid);
-  for (const run of tracker.listPlanRuns()) {
-    if (run.caller_issue_uuid === issueUuid) {
-      for (const i of tracker.listIssuesByPlanRun(run.id)) related.add(i.uuid);
-    }
+  // Use the indexed caller query instead of scanning every plan run.
+  for (const run of tracker.listPlanRunsByCaller(issueUuid)) {
+    for (const i of tracker.listIssuesByPlanRun(run.id)) related.add(i.uuid);
   }
   return [...related];
 }

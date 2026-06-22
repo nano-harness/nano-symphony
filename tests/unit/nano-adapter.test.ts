@@ -1,5 +1,5 @@
 /**
- * B3+B4: nano adapter unit tests.
+ * nano adapter unit tests.
  * Validates renderWorkspaceFiles writes .mcp.json (Claude Code compatible format)
  * and .nano/nano.yaml for permission_mode.
  * Also validates buildSpawnInvocation produces expected argv/env.
@@ -9,7 +9,7 @@ import { nanoAdapter } from "../../src/spawner/adapters/nano.ts";
 import type { SpawnContext } from "../../src/spawner/types.ts";
 
 function makeCtx(overrides: Partial<SpawnContext> = {}): SpawnContext {
-  return {
+  const base: SpawnContext = {
     issueUuid: "issue-1",
     attempt: 0,
     workspace: "/workspace",
@@ -17,12 +17,16 @@ function makeCtx(overrides: Partial<SpawnContext> = {}): SpawnContext {
     token: "test-token-abc",
     mcpUrl: "http://localhost:4123/mcp",
     outputDir: "/workspace/.nano-out",
-    config: {},
+    config: { transport: "mcp" },
+  };
+  return {
+    ...base,
     ...overrides,
+    config: { ...base.config, ...(overrides.config ?? {}) },
   };
 }
 
-describe("nano adapter — renderWorkspaceFiles (B3)", () => {
+describe("nano adapter — renderWorkspaceFiles", () => {
   test("writes .mcp.json with http transport type", () => {
     const files = nanoAdapter.renderWorkspaceFiles(makeCtx());
     expect(files.length).toBeGreaterThanOrEqual(1);
@@ -40,6 +44,7 @@ describe("nano adapter — renderWorkspaceFiles (B3)", () => {
     const yaml = files.find(f => f.path === ".nano/nano.yaml");
     expect(yaml).toBeDefined();
     expect(yaml!.contents).toContain("permission_mode: auto");
+    expect(yaml!.contents).toContain("sandbox:");
     expect(yaml!.contents).toContain("mcp_symphony_*");
   });
 
@@ -48,6 +53,13 @@ describe("nano adapter — renderWorkspaceFiles (B3)", () => {
     const yaml = files.find(f => f.path === ".nano/nano.yaml");
     expect(yaml).toBeDefined();
     expect(yaml!.contents).toContain("permission_mode: yolo");
+  });
+
+  test("writes .nano/nano.yaml with network_access when configured", () => {
+    const files = nanoAdapter.renderWorkspaceFiles(makeCtx({ config: { sandbox: { network_access: true } } }));
+    const yaml = files.find(f => f.path === ".nano/nano.yaml");
+    expect(yaml).toBeDefined();
+    expect(yaml!.contents).toContain("network_access: true");
   });
 
   test("writes .nano/nano.yaml only when trusted_binaries configured", () => {
@@ -89,10 +101,46 @@ describe("nano adapter — renderWorkspaceFiles (B3)", () => {
   });
 });
 
-describe("nano adapter — buildSpawnInvocation (B4)", () => {
-  test("argv starts with 'binary exec' and contains --stream and --mcp-config", () => {
+describe("nano adapter — CLI transport (default)", () => {
+  test("does not write .mcp.json when transport is cli", () => {
+    const files = nanoAdapter.renderWorkspaceFiles(makeCtx({ config: { transport: "cli" } }));
+    expect(files.find(f => f.path === ".mcp.json")).toBeUndefined();
+    expect(files.find(f => f.path === ".nano/nano.yaml")).toBeDefined();
+  });
+
+  test("writes .symphony/env instead of .mcp.json when transport is cli", () => {
+    const files = nanoAdapter.renderWorkspaceFiles(makeCtx({ config: { transport: "cli" } }));
+    expect(files.find(f => f.path === ".mcp.json")).toBeUndefined();
+    const envFile = files.find(f => f.path === ".symphony/env");
+    expect(envFile).toBeDefined();
+    expect(envFile?.contents).toContain("SYMPHONY_ISSUE_UUID=issue-1");
+    expect(envFile?.contents).toContain("SYMPHONY_WORKSPACE=/workspace");
+    expect(envFile?.contents).toContain("SYMPHONY_MCP_URL=http://localhost:4123/mcp");
+    expect(envFile?.contents).toContain("SYMPHONY_TOKEN=test-token-abc");
+  });
+
+  test("does not include --mcp-config and disallows mcp_symphony_* tools when transport is cli", () => {
+    const { argv } = nanoAdapter.buildSpawnInvocation(makeCtx({ config: { transport: "cli" } }));
+    expect(argv).not.toContain("--mcp-config");
+    expect(argv).toContain("--stream");
+    const idx = argv.indexOf("--disallowedTools");
+    expect(idx).toBeGreaterThan(-1);
+    expect(argv[idx + 1]).toBe("mcp_symphony_*");
+  });
+
+  test("env clears SYMPHONY_MCP_URL and SYMPHONY_TOKEN when transport is cli", () => {
+    const { env } = nanoAdapter.buildSpawnInvocation(makeCtx({ config: { transport: "cli" } }));
+    expect(env.SYMPHONY_MCP_URL).toBe("");
+    expect(env.SYMPHONY_TOKEN).toBe("");
+    expect(env.SYMPHONY_TRANSPORT).toBe("cli");
+  });
+});
+
+describe("nano adapter — buildSpawnInvocation", () => {
+  test("argv starts with 'binary exec' and contains --config, --stream and --mcp-config", () => {
     const { argv } = nanoAdapter.buildSpawnInvocation(makeCtx());
     expect(argv.slice(0, 2)).toEqual(["binary", "exec"]);
+    expect(argv).toContain("--config");
     expect(argv).toContain("--stream");
     const mcpIdx = argv.indexOf("--mcp-config");
     expect(mcpIdx).toBeGreaterThan(-1);
@@ -107,14 +155,13 @@ describe("nano adapter — buildSpawnInvocation (B4)", () => {
     expect(argv[idx + 1]).toBe("yolo");
   });
 
-  test("argv contains --allowedTools mcp_symphony_* and symphony.*", () => {
+  test("argv allows mcp_symphony_* tools in MCP mode", () => {
     const { argv } = nanoAdapter.buildSpawnInvocation(makeCtx());
     const allowedTools: string[] = [];
     for (let i = 0; i < argv.length - 1; i++) {
       if (argv[i] === "--allowedTools") allowedTools.push(argv[i + 1]);
     }
     expect(allowedTools).toContain("mcp_symphony_*");
-    expect(allowedTools).toContain("symphony.*");
   });
 
   test("extra allow rules forwarded as --allowedTools", () => {
@@ -147,12 +194,13 @@ describe("nano adapter — buildSpawnInvocation (B4)", () => {
     expect(addDirs).toContain("/tmp/data");
   });
 
-  test("env contains SYMPHONY_ISSUE_UUID and SYMPHONY_WORKSPACE, no SYMPHONY_TOKEN or SYMPHONY_MCP_URL", () => {
+  test("env contains SYMPHONY_ISSUE_UUID, SYMPHONY_WORKSPACE and SYMPHONY_TRANSPORT", () => {
     const { env, argv } = nanoAdapter.buildSpawnInvocation(makeCtx());
     expect(env.SYMPHONY_ISSUE_UUID).toBe("issue-1");
     expect(env.SYMPHONY_WORKSPACE).toBe("/workspace");
     expect(env.SYMPHONY_TOKEN).toBeUndefined();
     expect(env.SYMPHONY_MCP_URL).toBeUndefined();
+    expect(env.SYMPHONY_TRANSPORT).toBe("mcp");
     expect(argv).toContain("--mcp-config");
     expect(argv[argv.indexOf("--mcp-config") + 1]).toBe("/workspace/.mcp.json");
   });

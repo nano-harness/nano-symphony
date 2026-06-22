@@ -62,6 +62,7 @@ function buildWorkflowMd(agentBinary: string, mockEnv: Record<string, string>, o
     "  kind: nano",
     `  binary: \"${agentBinary.replace(/\\/g, "\\\\")}\"`,
     "  timeout_ms: 10000",
+    "  transport: mcp",
     `  max_retries: ${maxRetries}`,
   ];
 
@@ -108,7 +109,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
   await fs.mkdir(workspacesRoot, { recursive: true });
 
   // Build mock env vars to inject into the agent process via agent.extra_env in the workflow YAML.
-  // (S3: the spawner's ENV_ALLOWLIST blocks server env vars from reaching child processes, so mock
+  // (the spawner's ENV_ALLOWLIST blocks server env vars from reaching child processes, so mock
   // test vars must be passed explicitly through the workflow config instead.)
   const mockEnv: Record<string, string> = {};
   if (!opts.realBinary) {
@@ -127,8 +128,7 @@ export async function runE2e(opts: E2eOptions = {}): Promise<E2eResult> {
     DB_PATH: dbPath,
     WORKSPACE_ROOT: workspacesRoot,
     WORKFLOW_PATH: workflowPath,
-    NANO_BIN: agentBinary,
-    // S1: Provide a stable token for e2e so all API calls can authenticate.
+    // Provide a stable token for e2e so all API calls can authenticate.
     API_TOKEN: e2eApiToken,
   };
 

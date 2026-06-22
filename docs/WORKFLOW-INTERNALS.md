@@ -40,9 +40,10 @@ nano-symphony spawns the agent (nano or claude-code) via an `AgentAdapter` in
    `AgentResultSummary` (validated by `AgentResultSummarySchema`); for the
    claude-code adapter it parses the outer envelope `{type, is_error, result}`
    first, then JSON-parses the inner `result` string.
-2. Calls `adapter.collectArtifacts(ctx)` — the nano adapter reads
-   `<workspace>/.nano-out/solution.patch` from disk and returns
-   `{ patch }` (or `{}` if the file is absent).
+2. Collects artifacts via `collectAllArtifacts()` in the orchestrator, which
+   computes a git diff of the workspace. Adapters may also return additional
+   artifacts from `adapter.collectArtifacts(ctx)`, but the nano adapter currently
+   returns `{}` because nano-agent no longer writes `solution.patch`.
 
 There is no HTTP callback, no `result-hook.sh`, and no stdout sentinel.
 
@@ -59,16 +60,12 @@ another retry. This prevents wasting agent cycles on an identical obstruction.
 The worker records a `shortcircuit_same_cause` event with both the fingerprint
 and the attempt numbers.
 
-## 4. Sandbox hardening: read_only_paths injection
+## 4. Sandbox configuration
 
-For the `native` sandbox backend, the spawner injects `~/.config/nano` into
-`.nano.yaml.sandbox.read_only_paths` so agents cannot mutate the user's
-nano-agent configuration during a run. For `docker` and `none` backends, no
-injection happens.
-
-This is implemented in `src/spawner/adapters/nano.ts` via
-`mandatoryReadOnlyPaths(sandboxBackend)` and rendered into the YAML's
-`read_only_paths` list (not `denied_write_paths`).
+Sandbox paths are controlled by `workflow.agent.sandbox.extra_writable_paths` and
+forwarded to the agent via `--add-dir`. The orchestrator no longer injects
+`~/.config/nano` or other mandatory read-only paths into `.nano.yaml`; the agent
+is responsible for its own sandbox defaults.
 
 ## 5. WORKFLOW 文件生命周期与热重载
 

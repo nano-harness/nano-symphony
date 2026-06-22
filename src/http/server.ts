@@ -1,17 +1,17 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
-import { existsSync } from "fs";
-import fs from "fs/promises";
+import { existsSync, readFileSync } from "fs";
 import { resolve, join } from "path";
 import { timingSafeEqual } from "crypto";
-import { createRoutes } from "./routes.ts";
+import { createRoutes } from "./routes/index.ts";
 import { createMcpRouter } from "../mcp/server.ts";
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
 import { FRONTEND_DIST } from "../paths.ts";
 
-/** Constant-time string comparison to prevent timing attacks. */
+/** Constant-time string comparison to prevent timing attacks. Rejects empty tokens. */
 function isTokenValid(provided: string, expected: string): boolean {
+  if (!provided || !expected) return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
@@ -30,7 +30,9 @@ export function createHttpServer(
 ): Hono {
   // S1: Always enforce control-plane auth. If no token is provided, auto-generate
   // a random one so the control plane is never open by default.
-  const apiToken = options?.apiToken ?? crypto.randomUUID();
+  const apiToken = (options?.apiToken && options.apiToken.length > 0)
+    ? options.apiToken
+    : crypto.randomUUID();
   const app = new Hono();
   app.route("/mcp", createMcpRouter(tracker, getWorkflow));
 
@@ -61,25 +63,23 @@ export function createHttpServer(
   const distExists = existsSync(indexPath);
 
   if (distExists) {
+    // Cache index.html in memory; only the API token injection varies per request.
+    const indexHtml = readFileSync(indexPath, "utf-8");
+
     // Serve hashed build assets and favicon directly (no token needed).
     app.use("/assets/*", serveStatic({ root: staticRoot }));
     app.use("/favicon.svg", serveStatic({ root: staticRoot }));
 
     // All other paths (including /): serve index.html with injected API token.
-    app.get("*", async (c) => {
+    app.get("*", (c) => {
       if (c.req.path.includes("/.well-known/")) return c.notFound();
-      try {
-        const html = await fs.readFile(indexPath, "utf-8");
-        const injected = apiToken
-          ? html.replace(
-              "</head>",
-              `<script>window.__SYMPHONY_API_TOKEN__=${JSON.stringify(apiToken)}</script></head>`,
-            )
-          : html;
-        return c.html(injected);
-      } catch {
-        return c.notFound();
-      }
+      const injected = apiToken
+        ? indexHtml.replace(
+            "</head>",
+            `<script>window.__SYMPHONY_API_TOKEN__=${JSON.stringify(apiToken)}</script></head>`,
+          )
+        : indexHtml;
+      return c.html(injected);
     });
   } else {
     app.get("/", (c) =>

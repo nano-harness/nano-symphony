@@ -13,7 +13,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 describe("claude-code adapter settings", () => {
-  test("writes .claude/settings.local.json as empty object", async () => {
+  test("does not write .claude/settings.local.json", async () => {
     const workspace = await makeTempDir();
     const binary = path.join(workspace, "fake-claude.sh");
     await fs.writeFile(
@@ -40,11 +40,7 @@ describe("claude-code adapter settings", () => {
     });
 
     const settingsPath = path.join(workspace, ".claude/settings.local.json");
-    const raw = await fs.readFile(settingsPath, "utf-8");
-    const settings = JSON.parse(raw);
-
-    // Settings should be empty — let the user's own claude-code settings manage sandbox
-    expect(settings).toEqual({});
+    await expect(fs.access(settingsPath)).rejects.toBeDefined();
   });
 
   test("uses --permission-mode auto in spawn invocation", async () => {
@@ -79,7 +75,7 @@ describe("claude-code adapter settings", () => {
     expect(args).toContain("--permission-mode auto");
   });
 
-  test("allows symphony.* MCP tools in spawn invocation", async () => {
+  test("uses MCP config when transport is mcp", async () => {
     const workspace = await makeTempDir();
     const argsFile = path.join(workspace, "args.txt");
     const binary = path.join(workspace, "fake-claude.sh");
@@ -105,10 +101,10 @@ describe("claude-code adapter settings", () => {
       binary,
       timeoutMs: 5_000,
       agentKind: "claude-code",
+      agentConfig: { transport: "mcp" },
     });
 
     const args = await fs.readFile(argsFile, "utf-8");
-    expect(args).toContain("--allowedTools");
-    expect(args).toContain("symphony.*");
+    expect(args).toContain("--mcp-config");
   });
 });

@@ -64,6 +64,7 @@ describe("install.sh preserves user config files", () => {
       path.join(fakeBin, "bun"),
       `#!/usr/bin/env bash
 set -euo pipefail
+REAL_BUN="\${REAL_BUN:-bun}"
 if [ "\${1:-}" = "--version" ]; then
   echo "1.3.14"
 elif [ "\${1:-}" = "install" ]; then
@@ -71,13 +72,12 @@ elif [ "\${1:-}" = "install" ]; then
 elif [ "\${1:-}" = "-e" ]; then
   script="\${2:-}"
   if [[ "\${script}" == *"Bun.file"* ]]; then
-    key="version"
-    if [[ "\${script}" == *"install_script_url"* ]]; then
-      key="install_script_url"
-    fi
-    node -e 'const fs = require("fs"); console.log(JSON.parse(fs.readFileSync(process.env.META_FILE, "utf8"))[process.argv[1]] ?? "");' "\${key}"
+    "\$REAL_BUN" -e "\${script}"
+  elif [[ "\${script}" == *"getRandomValues"* ]]; then
+    # Simulate Bun crypto token generation without requiring node in PATH.
+    od -An -tx1 -N 32 /dev/urandom | tr -d ' \\n'
   else
-    node -e "\${script}"
+    "\$REAL_BUN" -e "\${script}"
   fi
 else
   echo "unexpected bun command: $*" >&2
@@ -122,6 +122,7 @@ esac
       BIN_DIR: binDir,
       OSS_BASE_URL: "https://example.test/symphony",
       META_FILE: metaFile,
+      REAL_BUN: Bun.argv[0],
     };
 
     // First install (fresh) — WORKFLOW.md and .env should be initialized from templates
@@ -157,7 +158,7 @@ esac
 
     const afterEnv = await fs.readFile(path.join(installDir, ".env"), "utf-8");
     expect(afterEnv).toBe(userEnv);
-  });
+  }, { timeout: 30000 });
 });
 
 describe("install.sh update command", () => {
@@ -188,6 +189,7 @@ describe("install.sh update command", () => {
       path.join(fakeBin, "bun"),
       `#!/usr/bin/env bash
 set -euo pipefail
+REAL_BUN="\${REAL_BUN:-bun}"
 if [ "\${1:-}" = "--version" ]; then
   echo "1.3.14"
 elif [ "\${1:-}" = "install" ]; then
@@ -195,13 +197,12 @@ elif [ "\${1:-}" = "install" ]; then
 elif [ "\${1:-}" = "-e" ]; then
   script="\${2:-}"
   if [[ "\${script}" == *"Bun.file"* ]]; then
-    key="version"
-    if [[ "\${script}" == *"install_script_url"* ]]; then
-      key="install_script_url"
-    fi
-    node -e 'const fs = require("fs"); console.log(JSON.parse(fs.readFileSync(process.env.META_FILE, "utf8"))[process.argv[1]] ?? "");' "\${key}"
+    "\$REAL_BUN" -e "\${script}"
+  elif [[ "\${script}" == *"getRandomValues"* ]]; then
+    # Simulate Bun crypto token generation without requiring node in PATH.
+    od -An -tx1 -N 32 /dev/urandom | tr -d ' \\n'
   else
-    node -e "\${script}"
+    "\$REAL_BUN" -e "\${script}"
   fi
 else
   echo "unexpected bun command: $*" >&2
@@ -246,6 +247,7 @@ esac
       INSTALL_DIR: installDir,
       BIN_DIR: binDir,
       OSS_BASE_URL: "https://example.test/symphony",
+      REAL_BUN: Bun.argv[0],
     };
     result = run(["bash", path.join(repoRoot, "install.sh")], { env });
     expect(result.exitCode).toBe(0);
@@ -255,5 +257,5 @@ esac
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain(`already up to date (${installedVersion})`);
     expect(await fs.readFile(curlLog, "utf-8")).not.toContain("install.sh");
-  });
+  }, { timeout: 30000 });
 });

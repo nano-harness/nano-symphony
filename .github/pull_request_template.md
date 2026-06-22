@@ -15,8 +15,8 @@
 ### 代码质量
 - [ ] 类型检查通过（`bun run lint`）
 - [ ] 后端测试通过（`bun test tests/`）
-- [ ] 前端测试通过（`cd frontend && npm run test`）
-- [ ] 前端构建成功（`cd frontend && npm run build`）
+- [ ] 前端测试通过（`cd frontend && bun run test`）
+- [ ] 前端构建成功（`cd frontend && bun run build`）
 
 ### 代码审查
 - [ ] 代码逻辑清晰，无冗余代码

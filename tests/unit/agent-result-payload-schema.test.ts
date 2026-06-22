@@ -88,6 +88,21 @@ describe("AgentResultSummarySchema", () => {
     expect(parsed.success).toBe(true);
   });
 
+  test("rejects non-success status without a reason", () => {
+    const parsed = AgentResultSummarySchema.safeParse({ status: "needs_retry" });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("rejects non-success status with empty reason", () => {
+    const parsed = AgentResultSummarySchema.safeParse({ status: "abandoned", reason: "   " });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("accepts success status without a reason", () => {
+    const parsed = AgentResultSummarySchema.safeParse({ status: "success" });
+    expect(parsed.success).toBe(true);
+  });
+
   test("accepts unknown fields in nested objects (goal_state, tokens, sandbox)", () => {
     const parsed = AgentResultSummarySchema.safeParse({
       status: "success",
@@ -110,17 +125,9 @@ describe("AgentArtifactsSchema", () => {
     expect(parsed.success).toBe(true);
   });
 
-  test("accepts object with patch string", () => {
-    const parsed = AgentArtifactsSchema.safeParse({ patch: "diff --git a/foo b/foo\n" });
+  test("accepts arbitrary adapter-specific artifact fields", () => {
+    const parsed = AgentArtifactsSchema.safeParse({ patch: "diff --git a/foo b/foo\n", files: ["a.txt"] });
     expect(parsed.success).toBe(true);
-    if (parsed.success) {
-      expect(parsed.data.patch).toBe("diff --git a/foo b/foo\n");
-    }
-  });
-
-  test("rejects patch as non-string", () => {
-    const parsed = AgentArtifactsSchema.safeParse({ patch: 123 });
-    expect(parsed.success).toBe(false);
   });
 });
 

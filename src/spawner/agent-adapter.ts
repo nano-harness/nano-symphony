@@ -1,7 +1,11 @@
 import type { AgentResultSummary, AgentArtifacts } from "./agent-result-payload.ts";
-import type { SpawnContext } from "./types.ts";
+import type { SpawnContext, AgentAdapterConfig } from "./types.ts";
 
 export type AgentKind = "nano" | "claude-code";
+
+export function isMcpTransport(config: AgentAdapterConfig): boolean {
+  return config.transport === "mcp";
+}
 
 export interface WorkspaceFile {
   path: string;       // relative to workspace root

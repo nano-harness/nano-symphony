@@ -9,6 +9,7 @@ import { calculateBackoff } from "./backoff.ts";
 import { appendRunLog } from "./run_log.ts";
 import type { Logger } from "pino";
 import { resolveAgent, type AgentRoleProfile } from "../agent-resolution.ts";
+import { AgentResultSummarySchema } from "../spawner/agent-result-payload.ts";
 import type { AgentResultSummary } from "../spawner/agent-result-payload.ts";
 import { incCounter, observeHistogram } from "../metrics.ts";
 import { config } from "../config.ts";
@@ -311,8 +312,8 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
   const maxRetries = resolved.maxRetries;
   const effectiveRoleProfile = resolved.roleProfile;
 
-  // S6: Issue agent token scoped to reporting-only tools (AGENT_TOOL_SCOPE).
-  // S7: Extend TTL to cover the full agent timeout plus a 10-minute buffer so
+  // Issue agent token scoped to reporting-only tools (AGENT_TOOL_SCOPE).
+  // Extend TTL to cover the full agent timeout plus a 10-minute buffer so
   //     tokens don't expire mid-session. Use config timeout as a fallback.
   const tokenTtlMs = baseTimeoutMs + 10 * 60 * 1000; // timeout + 10min buffer
   const token = issueToken(issueUuid, attempt, AGENT_TOOL_SCOPE, tokenTtlMs);
@@ -355,6 +356,7 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
         ...effectiveRoleProfile?.extra_env,
       },
       agentConfig: {
+        transport: effectiveRoleProfile?.transport ?? agentConfig?.transport ?? "cli",
         permission_mode: effectiveRoleProfile?.permission_mode ?? agentConfig?.permission_mode,
         permissions: effectiveRoleProfile?.permissions ?? agentConfig?.permissions,
         sandbox: effectiveRoleProfile?.sandbox ?? agentConfig?.sandbox,
@@ -374,7 +376,7 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
         if (ev.kind === "assistant_chunk") return; // 不写入 DB
         tracker.recordEvent(issueUuid, ev.kind, ev.message, ev.payload);
       },
-      // S9: Persist the agent PID so crash-restart can kill orphaned processes.
+      // Persist the agent PID so crash-restart can kill orphaned processes.
       onPidAssigned: (pid) => {
         tracker.updateAgentPid(issueUuid, pid);
       },
@@ -388,28 +390,23 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
     logger.error({ err, issueUuid }, "Agent spawn error");
     tracker.recordEvent(issueUuid, "error", `Agent error: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    // S9: Clear persisted PID — process has exited (or failed to start).
+    // Clear persisted PID — process has exited (or failed to start).
     tracker.updateAgentPid(issueUuid, null);
   }
 
   resultPayload = spawnResult?.agentResult ?? null;
 
-  // Contract validation: if the adapter produced a result, enforce stricter rules.
+  // Contract validation: the schema already enforces the status enum and requires
+  // a non-empty reason for non-success statuses. If validation fails, treat the
+  // payload as missing so the issue can retry instead of being silently accepted.
   if (resultPayload) {
-    const validated = (await import("../contract/validate.ts")).validateAgentResultSummary(resultPayload);
-    if (!validated.ok) {
-      logger.warn({ issueUuid, errors: validated.errors }, "Agent result violates contract");
-      tracker.recordEvent(issueUuid, "contract_violation", `Result violates contract: ${validated.errors.join("; ")}`, { errors: validated.errors, attempt });
+    const validated = AgentResultSummarySchema.safeParse(resultPayload);
+    if (!validated.success) {
+      const errors = validated.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+      logger.warn({ issueUuid, errors }, "Agent result violates contract");
+      tracker.recordEvent(issueUuid, "contract_violation", `Result violates contract: ${errors.join("; ")}`, { errors, attempt });
       resultPayload = null;
     }
-  }
-
-  const patch = spawnResult?.artifacts?.patch ?? null;
-  if (patch) {
-    tracker.recordPatch(issueUuid, attempt, patch);
-    tracker.recordEvent(issueUuid, "patch_collected", `patch length: ${patch.length}`, {
-      bytes: patch.length,
-    });
   }
 
   try {
@@ -439,7 +436,7 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
   let summary = derivedSummary;
 
   // Override semantics from session_completed MCP tool call if present.
-  // S4: Before accepting the override, validate that it is consistent with the
+  // Before accepting the override, validate that it is consistent with the
   // process outcome to prevent agents from claiming success after a non-zero exit.
   // Neutral intents (handoff, needs_retry) are accepted unconditionally.
   // Reporting success requires either a zero exit code or an absent exit code.
@@ -543,7 +540,7 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
 	      { commands: resultPayload.blocked_commands_sample, attempt });
 	  }
 
-	  const retryConfig = workflow.workflow.retry;
+  const retryConfig = workflow.workflow.retry;
   const base = retryConfig?.base_delay_ms ?? 5_000;
   const maxBackoff = retryConfig?.max_delay_ms ?? 300_000;
 
@@ -551,36 +548,57 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
   const transitions = workflow.workflow.state_transitions ?? {};
   let targetState: string | null = (transitions as Record<string, string | null>)[semantics] ?? null;
 
-  // Planning guard: if issue was in planning state but agent never submitted a plan,
-  // override semantics to needs_retry so the issue gets re-scheduled for planning.
-  if (issue.state === "planning") {
-    const planSubmitted = tracker.getLatestEventByKind(issueUuid, "plan_submitted");
-    if (!planSubmitted && semantics === "success") {
+  // Plan-run handoff: if the agent called spawn_plan_run_and_handoff, the issue
+  // was paused in awaiting_plan. Do not treat the missing session_completed as
+  // abandoned/cancelled; preserve the awaiting_plan state so plan-tick can resume
+  // the issue when the plan run finishes.
+  const issueAfterRun = tracker.getIssue(issueUuid);
+  if (issueAfterRun?.state === "awaiting_plan" && issueAfterRun?.plan_run_id && semantics !== "success") {
+    semantics = "handoff";
+    targetState = "awaiting_plan";
+    summary = summary ?? "Handed off to plan run";
+  }
+
+  // Plan guard: if issue requires a plan but agent never spawned one, override semantics.
+  if (issue.require_plan === true) {
+    const planSpawned = tracker.getLatestEventByKind(issueUuid, "plan_run_spawned");
+    if (!planSpawned && semantics === "success") {
       semantics = "needs_retry";
-      summary = "Agent completed without submitting a plan — retrying planning";
-      blockerFingerprint = "planning_no_plan_submitted";
-      targetState = null; // Keep in planning state for retry
-      tracker.recordEvent(issueUuid, "planning_guard", summary, { attempt });
+      summary = "Issue requires a plan but agent did not spawn one — retrying";
+      blockerFingerprint = "plan_required_no_plan_run_spawned";
+      targetState = null; // Keep in current state for retry
+      tracker.recordEvent(issueUuid, "plan_guard", summary, { attempt });
     }
   }
 
-  // Plan review guard: if agent submitted a plan during this run, the state is now plan_review.
-  // Do not transition away from plan_review — let the UI control it.
-  const currentIssue = tracker.getIssue(issueUuid);
-  if (currentIssue && currentIssue.state === "plan_review") {
-    semantics = "handoff";
-    targetState = "plan_review";
-    summary = summary ?? "Plan submitted for review";
+  // Budget enforcement: check before finalizing state so an exceeded budget can
+  // override success/needs_retry transitions. Include the current attempt's tokens
+  // and cost so budgets are enforced immediately.
+  if (spawnResult) {
+    const budget = checkIssueBudget(tracker, issueUuid, finalTokens, resultPayload);
+    if (budget.exceeded) {
+      semantics = "abandoned";
+      targetState = (transitions as Record<string, string | null>)["abandoned"] ?? "cancelled";
+      summary = budget.reason;
+      blockerFingerprint = budget.fingerprint;
+      tracker.recordEvent(issueUuid, "budget_exceeded", budget.reason ?? "Budget exceeded", budget.details);
+    }
   }
+
+  // Circuit breaker: compute before finalizing state so retries aren't scheduled
+  // for an already-tripped breaker.
+  const breakerTripped =
+    semantics === "needs_retry" &&
+    isCircuitBreakerOpen(tracker, issueUuid, config.CIRCUIT_BREAKER_FAILURE_THRESHOLD);
 
   // Wrap all state transition writes in a transaction to ensure atomicity.
   // If any write fails, all are rolled back — prevents partial state (e.g.
   // state=done but no corresponding released run row).
   tracker.withTransaction(() => {
-	  // 关键顺序：先 updateIssueState（改 issues.state），再 updateLastIssueState（同步到新值）
-	  // 否则 last_issue_state(旧) != issues.state(新)，会被 candidate SQL 重新拾起
-	  if (targetState && targetState !== issue.state) {
-	    tracker.updateIssueState(issueUuid, targetState);
+    // 关键顺序：先 updateIssueState（改 issues.state），再 updateLastIssueState（同步到新值）
+    // 否则 last_issue_state(旧) != issues.state(新)，会被 candidate SQL 重新拾起
+    if (targetState && targetState !== issue.state) {
+      tracker.updateIssueState(issueUuid, targetState);
     }
     const finalState = targetState ?? issue.state;
 
@@ -588,18 +606,20 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
       tracker.updateLastBlockerFingerprint(issueUuid, null);
       tracker.releaseIssue(issueUuid, "released");
       tracker.updateLastIssueState(issueUuid, finalState);
+      finalSemantics = semantics;
       finalTargetState = finalState;
       tracker.recordEvent(issueUuid, "completed", summary ?? "Agent completed successfully", { target_state: finalState });
-	  } else if (semantics === "handoff") {
-	    tracker.updateLastBlockerFingerprint(issueUuid, null);
-	    tracker.releaseIssue(issueUuid, finalState);
-	    tracker.updateLastIssueState(issueUuid, finalState);
-	    finalTargetState = finalState;
-	    tracker.recordEvent(issueUuid, "handoff", summary ?? "Agent handed off", { target_state: finalState });
-	  } else if (semantics === "needs_retry" && attempt < maxRetries) {
-	    // Same-cause short-circuit: if same fingerprint repeats and we've seen it before, skip retry
-	    const currentFingerprint = blockerFingerprint ?? "";
-	    const prevFingerprint = tracker.getLastBlockerFingerprint(issueUuid);
+    } else if (semantics === "handoff") {
+      tracker.updateLastBlockerFingerprint(issueUuid, null);
+      tracker.releaseIssue(issueUuid, finalState);
+      tracker.updateLastIssueState(issueUuid, finalState);
+      finalSemantics = semantics;
+      finalTargetState = finalState;
+      tracker.recordEvent(issueUuid, "handoff", summary ?? "Agent handed off", { target_state: finalState });
+    } else if (semantics === "needs_retry" && !breakerTripped && attempt < maxRetries) {
+      // Same-cause short-circuit: if same fingerprint repeats and we've seen it before, skip retry
+      const currentFingerprint = blockerFingerprint ?? "";
+      const prevFingerprint = tracker.getLastBlockerFingerprint(issueUuid);
 
       if (currentFingerprint && currentFingerprint === prevFingerprint && attempt >= 1) {
         // Short-circuit to blocked state
@@ -613,8 +633,8 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
 
         tracker.releaseIssue(issueUuid, "released");
         tracker.updateLastIssueState(issueUuid, blockedState);
+        finalSemantics = "abandoned";
         finalTargetState = blockedState;
-        finalSemantics = "abandoned"; // Short-circuit is effectively abandoned
         finalTerminationCause = "shortcircuit_same_cause";
         tracker.recordEvent(issueUuid, "shortcircuit_same_cause",
           `Same blocker repeated across attempts ${attempt} and ${attempt + 1}: ${currentFingerprint}`,
@@ -630,34 +650,44 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
         }
 
         tracker.scheduleRetry(issueUuid, nextDue, attempt + 1);
+        finalSemantics = semantics;
         finalTargetState = issue.state; // State doesn't change on retry
         tracker.recordEvent(issueUuid, "retry_scheduled", `Retry scheduled in ${delay}ms`, { delay, attempt: attempt + 1 });
       }
-	  } else {
-	    // Abandoned or max retries exceeded
-	    // Fallback: if needs_retry but no transition defined, map to abandoned → cancelled
-	    if (!targetState && semantics === "needs_retry") {
-	      targetState = (transitions as Record<string, string | null>)["abandoned"] ?? "cancelled";
-	      if (targetState !== issue.state) {
-	        tracker.updateIssueState(issueUuid, targetState);
-	      }
-	    }
-	    tracker.releaseIssue(issueUuid, "released");
-	    tracker.updateLastIssueState(issueUuid, finalState);
-	    finalTargetState = finalState;
-	    tracker.recordEvent(issueUuid, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
-	  }
-  });
+    } else {
+      // Abandoned, max retries exceeded, or circuit breaker tripped
+      // Fallback: if needs_retry but no transition defined, map to abandoned → cancelled
+      if (!targetState && semantics === "needs_retry") {
+        targetState = (transitions as Record<string, string | null>)["abandoned"] ?? "cancelled";
+        if (targetState !== issue.state) {
+          tracker.updateIssueState(issueUuid, targetState);
+        }
+      }
 
-  // Circuit breaker: after repeated needs_retry, block the issue regardless of fingerprint.
-  if (semantics === "needs_retry") {
-    const breakerState = checkCircuitBreaker(tracker, issueUuid, config.CIRCUIT_BREAKER_FAILURE_THRESHOLD);
-    if (breakerState) {
-      finalSemantics = "abandoned";
-      finalTargetState = breakerState;
-      semantics = "abandoned";
+      if (breakerTripped) {
+        const blockedState = transitions.blocked
+          ?? transitions.abandoned
+          ?? "blocked";
+        if (blockedState !== issue.state) {
+          tracker.updateIssueState(issueUuid, blockedState);
+        }
+        tracker.releaseIssue(issueUuid, "released");
+        tracker.updateLastIssueState(issueUuid, blockedState);
+        finalSemantics = "abandoned";
+        finalTargetState = blockedState;
+        finalTerminationCause = "circuit_breaker";
+        tracker.recordEvent(issueUuid, "circuit_breaker_opened",
+          `Circuit breaker opened after repeated failures`,
+          { target_state: blockedState, threshold: config.CIRCUIT_BREAKER_FAILURE_THRESHOLD });
+      } else {
+        tracker.releaseIssue(issueUuid, "released");
+        tracker.updateLastIssueState(issueUuid, finalState);
+        finalSemantics = semantics;
+        finalTargetState = finalState;
+        tracker.recordEvent(issueUuid, "abandoned", summary ?? "Agent abandoned or max retries exceeded", { target_state: finalState });
+      }
     }
-  }
+  });
 
   revokeToken(token);
 
@@ -682,10 +712,8 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
     incCounter("symphony_agent_attempts_total", { agent_kind: agentKind, provider, model, semantics });
     incCounter("symphony_tokens_total", { agent_kind: agentKind, kind: "input" }, finalTokens?.input ?? 0);
     incCounter("symphony_tokens_total", { agent_kind: agentKind, kind: "output" }, finalTokens?.output ?? 0);
-    observeHistogram("symphony_agent_duration_seconds", spawnResult.duration_ms);
+    observeHistogram("symphony_agent_duration_milliseconds", spawnResult.duration_ms);
 
-    // Enforce per-issue cost/token budgets after recording usage.
-    enforceBudgetIfNeeded(ctx.tracker, issueUuid);
   }
 
   // Persist a terminal snapshot of issue metrics for durable reporting/export.
@@ -737,63 +765,95 @@ export async function runWorker(issueUuid: string, attempt: number, ctx: WorkerC
   }
 }
 
-function checkCircuitBreaker(tracker: Tracker, issueUuid: string, threshold: number): string | null {
-  if (threshold <= 0) return null;
+function isCircuitBreakerOpen(tracker: Tracker, issueUuid: string, threshold: number): boolean {
+  if (threshold <= 0) return false;
   const events = tracker.getEventsByKind(issueUuid, "session_completed");
   let consecutiveFailures = 0;
   for (let i = events.length - 1; i >= 0; i--) {
-    const payload = JSON.parse(events[i].payload_json ?? "{}") as { semantics?: string };
-    if (payload.semantics === "needs_retry") {
-      consecutiveFailures++;
-    } else {
+    try {
+      const payload = JSON.parse(events[i].payload_json ?? "{}") as { semantics?: string };
+      if (payload.semantics === "needs_retry") {
+        consecutiveFailures++;
+      } else {
+        break;
+      }
+    } catch {
       break;
     }
   }
-  if (consecutiveFailures >= threshold) {
-    const issue = tracker.getIssue(issueUuid);
-    if (!issue || issue.state === "blocked") return null;
-    tracker.updateIssueState(issueUuid, "blocked");
-    tracker.updateLastIssueState(issueUuid, "blocked");
-    tracker.releaseIssue(issueUuid, "released");
-    tracker.recordEvent(issueUuid, "circuit_breaker_opened",
-      `Circuit breaker opened after ${consecutiveFailures} consecutive failures`,
-      { consecutive_failures: consecutiveFailures, threshold });
-    return "blocked";
-  }
-  return null;
+  return consecutiveFailures >= threshold;
 }
 
+interface BudgetCheckResult {
+  exceeded: boolean;
+  reason?: string;
+  fingerprint?: string;
+  details?: Record<string, unknown>;
+}
+
+function checkIssueBudget(
+  tracker: Tracker,
+  issueUuid: string,
+  currentTokens: { input: number; output: number; total: number } | null,
+  resultPayload: AgentResultSummary | null,
+): BudgetCheckResult {
+  const issue = tracker.getIssue(issueUuid);
+  if (!issue) return { exceeded: false };
+  if (issue.cost_budget_usd == null && issue.token_budget == null) return { exceeded: false };
+
+  const summary = tracker.getLlmCallSummary(issueUuid);
+  const currentInput = currentTokens?.input ?? 0;
+  const currentOutput = currentTokens?.output ?? 0;
+  const currentCost = resultPayload && "cost_usd" in resultPayload ? Number(resultPayload.cost_usd) : 0;
+
+  const totalTokens = summary.input_tokens + summary.output_tokens + currentInput + currentOutput;
+  const totalCost = summary.cost_usd + (Number.isFinite(currentCost) ? currentCost : 0);
+
+  if (issue.token_budget != null && totalTokens > issue.token_budget) {
+    const reason = `Tokens ${totalTokens} exceed budget ${issue.token_budget}`;
+    return {
+      exceeded: true,
+      reason,
+      fingerprint: "budget_exceeded:tokens",
+      details: {
+        input_tokens: summary.input_tokens + currentInput,
+        output_tokens: summary.output_tokens + currentOutput,
+        token_budget: issue.token_budget,
+        total_tokens: totalTokens,
+        reason,
+      },
+    };
+  }
+
+  if (issue.cost_budget_usd != null && totalCost > issue.cost_budget_usd) {
+    const reason = `Cost $${totalCost.toFixed(4)} exceeds budget $${issue.cost_budget_usd.toFixed(4)}`;
+    return {
+      exceeded: true,
+      reason,
+      fingerprint: "budget_exceeded:cost",
+      details: {
+        cost_usd: totalCost,
+        cost_budget_usd: issue.cost_budget_usd,
+        reason,
+      },
+    };
+  }
+
+  return { exceeded: false };
+}
+
+/** Backward-compatible exported helper used by tests and external callers. */
 export function enforceBudgetIfNeeded(tracker: Tracker, issueUuid: string): void {
   const issue = tracker.getIssue(issueUuid);
   if (!issue) return;
   if (issue.state === "done" || issue.state === "cancelled") return;
-  if (issue.cost_budget_usd == null && issue.token_budget == null) return;
 
-  const summary = tracker.getLlmCallSummary(issueUuid);
-  let exceeded = false;
-  let reason = "";
+  const budget = checkIssueBudget(tracker, issueUuid, null, null);
+  if (!budget.exceeded) return;
 
-  if (issue.cost_budget_usd != null && summary.cost_usd > issue.cost_budget_usd) {
-    exceeded = true;
-    reason = `Cost $${summary.cost_usd.toFixed(4)} exceeds budget $${issue.cost_budget_usd.toFixed(4)}`;
-  }
-  if (!exceeded && issue.token_budget != null && summary.input_tokens + summary.output_tokens > issue.token_budget) {
-    exceeded = true;
-    reason = `Tokens ${summary.input_tokens + summary.output_tokens} exceed budget ${issue.token_budget}`;
-  }
-
-  if (exceeded) {
-    tracker.updateIssueState(issueUuid, "cancelled");
-    tracker.updateLastIssueState(issueUuid, "cancelled");
-    tracker.recordEvent(issueUuid, "budget_exceeded", reason, {
-      cost_usd: summary.cost_usd,
-      input_tokens: summary.input_tokens,
-      output_tokens: summary.output_tokens,
-      cost_budget_usd: issue.cost_budget_usd,
-      token_budget: issue.token_budget,
-      reason,
-    });
-  }
+  tracker.updateIssueState(issueUuid, "cancelled");
+  tracker.updateLastIssueState(issueUuid, "cancelled");
+  tracker.recordEvent(issueUuid, "budget_exceeded", budget.reason ?? "Budget exceeded", budget.details);
 }
 
 function inferLlmProviderAndModel(agentKind: string): { provider: string; model: string } {

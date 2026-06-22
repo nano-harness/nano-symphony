@@ -16,18 +16,17 @@ import type { Workflow } from "./workflow/types.ts";
 const logger = pino({ level: config.LOG_LEVEL });
 
 async function main() {
-  // S7: Initialize MCP token TTL from config so it's not stuck at the hard-coded 1h default.
-  setTokenTtl(config.MCP_TOKEN_TTL_MS);
+  // S7: Initialize agent session token TTL from config so it's not stuck at the hard-coded 1h default.
+  setTokenTtl(config.AGENT_TOKEN_TTL_MS);
 
   // S1: Auto-generate API token if not configured so the control plane is always protected.
-  // The server.ts layer also auto-generates if undefined, but doing it here lets us log the
-  // value for the operator at startup.
+  // Non-loopback binds require an explicit token (enforced in config.ts); this fallback only
+  // applies to loopback development mode. The token value is never logged.
   const apiToken = config.API_TOKEN ?? (() => {
     const generated = randomUUID();
     logger.warn(
-      { token: generated },
       "API_TOKEN not set — auto-generated a random token for this session. " +
-      "Set API_TOKEN env var to use a stable token across restarts."
+      "Run 'symphony token' to view it, or set API_TOKEN to keep it stable across restarts."
     );
     return generated;
   })();

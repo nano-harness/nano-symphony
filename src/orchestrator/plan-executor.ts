@@ -46,6 +46,16 @@ export async function executePlan(
 
   logger.info({ runId, name: (meta as unknown as Record<string, unknown>).name }, "Plan executor starting");
 
+  // Token budget is enforced across all sub-issues spawned by this plan run.
+  // Recompute on each call so the sandbox sees up-to-date spend as issues finish.
+  const tokenSpent = () => {
+    const issues = tracker.listIssuesByPlanRun(runId);
+    return issues.reduce((sum, issue) => {
+      const s = tracker.getLlmCallSummary(issue.uuid);
+      return sum + s.input_tokens + s.output_tokens;
+    }, 0);
+  };
+
   const result = await runPlan({
     runId,
     script: run.script,
@@ -53,7 +63,7 @@ export async function executePlan(
     maxIssues: meta.max_issues,
     wallTimeMs: run.wall_time_ms,
     tracker,
-    tokenSpent: () => 0, // token tracking is per-agent, not per-run
+    tokenSpent,
     tokenTotal: meta.max_budget_tokens ?? 0,
     maxRetries: (meta as unknown as Record<string, unknown>).max_retries as number | undefined,
   });
@@ -68,7 +78,7 @@ export async function executePlan(
     tracker.finishPlanRun(runId, "failed", result.error);
     logger.warn({ runId, error: result.error }, "Plan executor failed");
 
-    // Emit structured failure event for observability (W2)
+    // Emit structured failure event for observability
     const callerIssueId = run.caller_issue_uuid;
     if (callerIssueId) {
       const lastLogTruncated = result.lastLog && result.lastLog.length > 1024

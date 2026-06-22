@@ -178,7 +178,6 @@ async function main() {
     DB_PATH: dbPath,
     WORKSPACE_ROOT: workspacesRoot,
     WORKFLOW_PATH: workflowPath,
-    NANO_BIN: mockAgentPath,
     API_TOKEN: e2eToken,
   };
 

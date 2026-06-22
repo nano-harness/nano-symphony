@@ -142,74 +142,10 @@ describe("MCP tools", () => {
     expect(r.state).toBe("in_review");
   });
 
-  // Plan workflow tests
-  describe("symphony.submit_plan", () => {
-    test("submit_plan records plan_submitted event and transitions to plan_review", async () => {
-      tracker.updateIssueState("issue-1", "planning");
-      const r = await handleTool("symphony.submit_plan", { markdown: "# My Plan\n\n- Step 1\n- Step 2" }, "issue-1", 0, tracker) as { ok: boolean; message: string };
-      expect(r.ok).toBe(true);
-      expect(r.message).toContain("Plan submitted");
-      expect(tracker.getIssue("issue-1")!.state).toBe("plan_review");
-      const event = tracker.getLatestEventByKind("issue-1", "plan_submitted");
-      expect(event).toBeDefined();
-      const payload = JSON.parse(event!.payload_json ?? "{}");
-      expect(payload.markdown).toContain("My Plan");
-      expect(payload.revision).toBe(0);
-    });
-
-    test("submit_plan increments revision on subsequent submissions", async () => {
-      tracker.updateIssueState("issue-1", "planning");
-      await handleTool("symphony.submit_plan", { markdown: "# Plan v1" }, "issue-1", 0, tracker);
-      tracker.updateIssueState("issue-1", "planning");
-      await handleTool("symphony.submit_plan", { markdown: "# Plan v2" }, "issue-1", 0, tracker);
-      const event = tracker.getLatestEventByKind("issue-1", "plan_submitted");
-      const payload = JSON.parse(event!.payload_json ?? "{}");
-      expect(payload.revision).toBe(1);
-    });
-
-    test("submit_plan rejects when issue is not in planning state", async () => {
-      // issue-1 is in_progress by default in beforeEach
-      const r = await handleTool("symphony.submit_plan", { markdown: "# Plan" }, "issue-1", 0, tracker) as { ok: boolean; error?: string };
-      expect(r.ok).toBe(false);
-      expect(r.error).toContain("planning");
-    });
-
-    test("submit_plan stores steps and estimates in payload", async () => {
-      tracker.updateIssueState("issue-1", "planning");
-      const steps = [{ id: "s1", title: "Step 1", description: "Do step 1" }];
-      const estimates = { files_touched: 3, complexity: "low" as const, estimated_turns: 5 };
-      await handleTool("symphony.submit_plan", { markdown: "# Plan", steps, estimates }, "issue-1", 0, tracker);
-      const event = tracker.getLatestEventByKind("issue-1", "plan_submitted");
-      const payload = JSON.parse(event!.payload_json ?? "{}");
-      expect(payload.steps).toEqual(steps);
-      expect(payload.estimates).toEqual(estimates);
-    });
-  });
-
-  describe("symphony.session_completed in planning phase", () => {
-    test("handoff semantics in planning phase auto-submits plan and transitions to plan_review", async () => {
-      tracker.updateIssueState("issue-1", "planning");
-      const r = await handleTool("symphony.session_completed", { semantics: "handoff", summary: "Finished planning" }, "issue-1", 0, tracker) as { ok: boolean };
-      expect(r.ok).toBe(true);
-      expect(tracker.getIssue("issue-1")!.state).toBe("plan_review");
-      const event = tracker.getLatestEventByKind("issue-1", "plan_submitted");
-      expect(event).toBeDefined();
-    });
-
-    test("needs_retry semantics in planning phase keeps normal retry behavior", async () => {
-      tracker.updateIssueState("issue-1", "planning");
-      const r = await handleTool("symphony.session_completed", { semantics: "needs_retry", summary: "Cannot plan yet" }, "issue-1", 0, tracker) as { ok: boolean };
-      expect(r.ok).toBe(true);
-      // Should NOT create plan_submitted event
-      const event = tracker.getLatestEventByKind("issue-1", "plan_submitted");
-      expect(event).toBeNull();
-    });
-  });
-
-  test("A6: suggest_state_transition to 'planning' is allowed", async () => {
+  test("A6: suggest_state_transition to 'in_progress' is allowed", async () => {
     tracker.updateIssueState("issue-1", "todo");
-    const r = await handleTool("symphony.suggest_state_transition", { suggested_state: "planning", reason: "entering planning phase" }, "issue-1", 0, tracker) as { ok: boolean; state?: string };
+    const r = await handleTool("symphony.suggest_state_transition", { suggested_state: "in_progress", reason: "start working" }, "issue-1", 0, tracker) as { ok: boolean; state?: string };
     expect(r.ok).toBe(true);
-    expect(r.state).toBe("planning");
+    expect(r.state).toBe("in_progress");
   });
 });

@@ -38,7 +38,7 @@ nano-symphony is a lightweight orchestration service for running coding-agent wo
 ## Requirements
 
 - [Bun](https://bun.sh/) for dependency installation, running the backend, tests, and frontend build.
-- A compatible coding-agent executable available on `PATH` or configured through `NANO_BIN` / workflow settings. Unspecified workflows default to `claude-code` with the `claude` binary; set `agent.kind: nano` to use nano explicitly.
+- A compatible coding-agent executable available on `PATH` and configured through workflow settings. Unspecified workflows default to `claude-code` with the `claude` binary; set `agent.kind: nano` to use nano explicitly.
 
 ## Download
 
@@ -194,18 +194,18 @@ Runtime configuration is read from environment variables and validated at startu
 | `API_TOKEN` | *(auto-generated)* | Shared secret protecting `/api/v1/*`. **Always enforced** — a random UUID is auto-generated if unset, so the API is never open by default. Set an explicit value to keep the token stable across restarts. Provide as `Authorization: ******` or `X-Symphony-Token: <your-token>` header (or `?token=` query param for EventSource). The token is injected into the served dashboard for automatic auth. |
 | `DB_PATH` | `./symphony.db` | SQLite database path. |
 | `WORKFLOW_PATH` | `./WORKFLOW.md` | Workflow Markdown file path. |
-| `NANO_BIN` | `claude` | Default fallback agent binary. |
 | `WORKSPACE_ROOT` | `./workspaces` | Root directory for generated workspaces. |
 | `LOG_LEVEL` | `info` | Pino log level. |
 | `MAX_CONCURRENT_AGENTS` | `3` | Maximum concurrent agent runs. |
-| `MCP_TOKEN_TTL_MS` | `3600000` | MCP token time-to-live in milliseconds. |
-| `ORCHESTRATOR_TICK_MS` | `5000` | Orchestrator polling interval in milliseconds. |
+| `AGENT_TOKEN_TTL_MS` | `3600000` | Agent session token time-to-live in milliseconds. |
+| `MCP_TOKEN_TTL_MS` | *(deprecated)* | Deprecated alias for `AGENT_TOKEN_TTL_MS`. |
+| `ORCHESTRATOR_TICK_MS` | `1000` | Orchestrator polling interval in milliseconds. |
 
 ### Security model
 
 - **Control plane auth** (`API_TOKEN`): Always enforced — every request to `/api/v1/*` (except `/api/v1/health`) must include the token via `Authorization` or `X-Symphony-Token` header. A random UUID is auto-generated at startup if `API_TOKEN` is unset; set it explicitly to keep the same token across restarts. Comparison is constant-time to prevent timing attacks. The token is injected as `window.__SYMPHONY_API_TOKEN__` into the served HTML so that the built-in dashboard authenticates automatically.
 - **Bind address** (`HOST`): Defaults to `127.0.0.1` (loopback only). Symphony refuses to start if `HOST` is a non-loopback address and `API_TOKEN` is unset.
-- **Child process isolation**: Agent subprocesses receive only a minimal environment (`PATH`, `HOME`, locale variables, etc.) — symphony's own credentials and secrets are never forwarded.
+- **Control-plane secrets**: Agent subprocesses do not receive symphony's own service credentials (`API_TOKEN`, `SYMPHONY_API_TOKEN`) or the parent Claude Code session variables. Other environment variables (e.g. `PATH`, `HOME`, provider API keys set by the operator) are preserved so the agent can access required tools. If you need stricter isolation, run symphony in an environment that only contains the variables the agent should see.
 
 ## Sandbox
 
@@ -444,4 +444,4 @@ These tests verify:
 
 ## License
 
-No license file is currently included in this repository.
+This project is licensed under the [MIT License](LICENSE).

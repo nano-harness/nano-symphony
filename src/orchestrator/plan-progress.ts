@@ -22,7 +22,9 @@ const ACTIVE_STATES = new Set(["todo", "planning", "plan_review", "in_progress",
  * cancelled so multi-agent orchestrations don't leave parents dangling.
  */
 export function syncParentPlanRunProgress(tracker: Tracker, logger: Logger): void {
-  const runs = tracker.listPlanRuns();
+  // Only sync runs that are still active or terminal runs whose parent hasn't
+  // been finalized yet. This avoids O(total plan runs) work every tick.
+  const runs = tracker.listPlanRunsNeedingProgressSync();
   for (const run of runs) {
     if (!run.caller_issue_uuid) continue;
     const parent = tracker.getIssue(run.caller_issue_uuid);

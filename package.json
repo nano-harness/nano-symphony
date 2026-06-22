@@ -1,20 +1,19 @@
 {
   "name": "nano-symphony",
-  "version": "0.1.0",
+  "version": "0.9.6",
   "type": "module",
   "scripts": {
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
-    "build": "cd frontend && npm run build",
+    "build": "cd frontend && bun run build",
     "lint": "tsc --noEmit",
     "test:unit": "bun test tests/unit tests/*.test.ts",
     "test:e2e": "bun test tests/e2e --concurrency 1",
-    "test": "bun test tests/unit tests/*.test.ts && bun test tests/e2e --concurrency 1 && cd frontend && npm run test",
+    "test": "bun test tests/unit tests/*.test.ts && bun test tests/e2e --concurrency 1 && cd frontend && bun run test",
     "generate-contract": "bun scripts/generate-contract.ts",
     "workflow:validate": "bun scripts/validate-workflow.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
     "chokidar": "^3.6.0",
     "gray-matter": "^4.0.3",
     "hono": "^4.6.0",

@@ -1,41 +1,43 @@
 import path from "path";
 import { AgentResultSummarySchema, parseLastJsonLine } from "../agent-result-payload.ts";
 import type { AgentResultSummary, AgentArtifacts } from "../agent-result-payload.ts";
-import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation } from "../agent-adapter.ts";
+import { registerAdapter, type AgentAdapter, type WorkspaceFile, type SpawnInvocation, isMcpTransport } from "../agent-adapter.ts";
+import { renderEnvFile, renderMcpJson } from "../cli-files.ts";
 import type { SpawnContext } from "../types.ts";
 
 let lastToolName = "unknown_tool";
 
-/** Render .mcp.json — Claude Code compatible format, shared with nano's --mcp-config parser. */
-function renderMcpJson(ctx: SpawnContext): string {
-  return JSON.stringify({
-    mcpServers: {
-      symphony: {
-        type: "http",
-        url: ctx.mcpUrl,
-        headers: {
-          "X-Symphony-Token": ctx.token,
-        },
-      },
-    },
-  }, null, 2);
-}
-
-/** Minimal YAML for nano-specific config (hooks, trusted_binaries, permission_mode) written to .nano/nano.yaml. */
 function renderNanoYaml(ctx: SpawnContext): string {
   const lines: string[] = [];
   const mode = ctx.config.permission_mode ?? "auto";
-  lines.push(`permission_mode: ${mode}`);
+
+  lines.push("permission_mode: " + mode);
+
+  // Headless binary exec needs an explicit daemon confirm_policy or tools that
+  // require confirmation (including the first run_shell_command) are blocked
+  // fail-closed. This mirrors --dangerously-skip-permissions for non-interactive runs.
+  lines.push("daemon:");
+  lines.push("  confirm_policy: allow");
+
+  lines.push("sandbox:");
+  lines.push("  backend: native");
+  if (ctx.config.sandbox?.network_access) {
+    lines.push("  network_access: true");
+  } else {
+    lines.push("  network_access: false");
+  }
+
   // In ModeAuto the permission manager only fast-paths a small hardcoded list
   // of safe MCP tools. The injected symphony MCP server (emit_result,
   // session_completed, etc.) is not on that list, so headless runs would
   // reach the confirmation stage and fail-closed. Add an explicit session
-  // allowlist for the trusted symphony MCP namespace.
-  if (mode === "auto") {
+  // allowlist for the trusted symphony MCP namespace only when MCP is enabled.
+  if (mode === "auto" && isMcpTransport(ctx.config)) {
     lines.push("permission_auto:");
     lines.push("  allow_rules:");
     lines.push("    - mcp_symphony_*");
   }
+
   if (ctx.config.trusted_binaries?.length) {
     lines.push("trusted_binaries:");
     for (const b of ctx.config.trusted_binaries) {
@@ -55,29 +57,47 @@ export const nanoAdapter: AgentAdapter = {
   kind: "nano",
 
   async prepare(): Promise<void> {
-    // Verify nano binary is available
-    const ok = await Bun.spawn(["nano", "--version"], { stdout: "ignore", stderr: "ignore" }).exited;
-    if (ok !== 0) {
-      console.warn("[nano-adapter] nano binary not found or not executable");
+    // Verify nano binary is available, with a timeout so a hung process does not
+    // block symphony startup.
+    const proc = Bun.spawn(["nano", "--version"], { stdout: "ignore", stderr: "ignore" });
+    const timeout = setTimeout(() => proc.kill("SIGKILL"), 5_000);
+    try {
+      const ok = await proc.exited;
+      if (ok !== 0) {
+        console.warn("[nano-adapter] nano binary not found or not executable");
+      }
+    } catch {
+      console.warn("[nano-adapter] nano --version check failed");
+    } finally {
+      clearTimeout(timeout);
     }
   },
 
   renderWorkspaceFiles(ctx: SpawnContext): WorkspaceFile[] {
-    return [
-      { path: ".mcp.json", contents: renderMcpJson(ctx), mode: 0o600 },
+    const files: WorkspaceFile[] = [
       { path: ".nano/nano.yaml", contents: renderNanoYaml(ctx), mode: 0o644 },
     ];
+    if (isMcpTransport(ctx.config)) {
+      files.push({ path: ".mcp.json", contents: renderMcpJson(ctx), mode: 0o600 });
+    } else {
+      // CLI mode: hide MCP credentials from the agent process by writing them to
+      // .symphony/env. The global `symphony` wrapper searches upward from $PWD
+      // to load this file; no workspace-local wrapper binary is needed.
+      files.push({ path: ".symphony/env", contents: renderEnvFile(ctx), mode: 0o600 });
+    }
+    return files;
   },
 
   buildSpawnInvocation(ctx: SpawnContext): SpawnInvocation {
+    const configPath = path.join(ctx.workspace, ".nano", "nano.yaml");
     const argv = [
       "binary", "exec",
+      "--config", configPath,
       "--output-dir", ctx.outputDir,
       "--stream",
-      "--mcp-config", path.join(ctx.workspace, ".mcp.json"),
+      ...(isMcpTransport(ctx.config) ? ["--mcp-config", path.join(ctx.workspace, ".mcp.json")] : []),
       "--permission-mode", ctx.config.permission_mode ?? "auto",
-      "--allowedTools", "mcp_symphony_*",
-      "--allowedTools", "symphony.*",
+      ...(isMcpTransport(ctx.config) ? ["--allowedTools", "mcp_symphony_*"] : ["--disallowedTools", "mcp_symphony_*"]),
       ...(ctx.config.permissions?.allow ?? []).flatMap(r => ["--allowedTools", r]),
       ...(ctx.config.permissions?.deny ?? []).flatMap(r => ["--disallowedTools", r]),
       ...(ctx.config.sandbox?.extra_writable_paths ?? []).flatMap(p => ["--add-dir", p]),
@@ -88,6 +108,11 @@ export const nanoAdapter: AgentAdapter = {
       env: {
         SYMPHONY_ISSUE_UUID: ctx.issueUuid,
         SYMPHONY_WORKSPACE: ctx.workspace,
+        // CLI mode: hide the MCP endpoint credentials from the agent process so
+        // nano cannot auto-discover the symphony MCP server. The `symphony`
+        // wrapper reads them from .symphony/env instead.
+        ...(isMcpTransport(ctx.config) ? {} : { SYMPHONY_MCP_URL: "", SYMPHONY_TOKEN: "" }),
+        SYMPHONY_TRANSPORT: ctx.config.transport ?? "cli",
       },
     };
   },

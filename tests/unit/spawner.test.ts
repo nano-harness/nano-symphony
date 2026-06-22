@@ -43,6 +43,7 @@ describe("spawnAgent (nano adapter)", () => {
       binary,
       timeoutMs: 5_000,
       agentKind: "nano",
+      agentConfig: { transport: "mcp" },
     });
 
     expect(result.exitCode).toBe(0);
@@ -63,6 +64,40 @@ describe("spawnAgent (nano adapter)", () => {
     expect(parsed.mcpServers.symphony.type).toBe("http");
     expect(parsed.mcpServers.symphony.url).toBe("http://localhost:4123/mcp");
     expect(parsed.mcpServers.symphony.headers["X-Symphony-Token"]).toBe("secret-token");
+  });
+
+  test("CLI transport default: does not write .mcp.json or pass --mcp-config", async () => {
+    const workspace = await makeTempDir();
+    const binary = path.join(workspace, "fake-nano.sh");
+    await fs.writeFile(
+      binary,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$@\" > args.txt",
+        "cat > stdin.txt",
+        `printf '%s\\n' '{"status":"success","reason":"done"}'`,
+      ].join("\n"),
+      "utf-8"
+    );
+    await fs.chmod(binary, 0o755);
+
+    const result = await spawnAgent({
+      issueUuid: "issue-cli",
+      attempt: 0,
+      workspace,
+      prompt: "prompt from stdin",
+      token: "secret-token",
+      mcpUrl: "http://localhost:4123/mcp",
+      binary,
+      timeoutMs: 5_000,
+      agentKind: "nano",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.agentResult).toEqual({ status: "success", reason: "done" });
+    await expect(fs.access(path.join(workspace, ".mcp.json"))).rejects.toBeDefined();
+    const args = await fs.readFile(path.join(workspace, "args.txt"), "utf-8");
+    expect(args).not.toContain("--mcp-config");
   });
 
   test("returns null agentResult when stdout is empty", async () => {
@@ -147,6 +182,7 @@ describe("spawnAgent (claude-code adapter)", () => {
       binary,
       timeoutMs: 5_000,
       agentKind: "claude-code",
+      agentConfig: { transport: "mcp" },
     });
 
     expect(result.exitCode).toBe(0);
@@ -159,6 +195,39 @@ describe("spawnAgent (claude-code adapter)", () => {
     const systemPrompt = await fs.readFile(path.join(workspace, ".claude/append-system-prompt.md"), "utf-8");
     expect(systemPrompt).toContain("status");
     expect(systemPrompt).toContain("JSON");
+  });
+
+  test("CLI transport default: writes system prompt but not .mcp.json", async () => {
+    const workspace = await makeTempDir();
+    const binary = path.join(workspace, "fake-claude.sh");
+    await fs.writeFile(
+      binary,
+      [
+        "#!/bin/sh",
+        "cat > /dev/null",
+        `printf '%s\\n' '{"type":"result","result":"{\\"status\\":\\"success\\",\\"reason\\":\\"done\\"}"}'`,
+      ].join("\n"),
+      "utf-8"
+    );
+    await fs.chmod(binary, 0o755);
+
+    const result = await spawnAgent({
+      issueUuid: "issue-claude-cli",
+      attempt: 0,
+      workspace,
+      prompt: "do the thing",
+      token: "tok-123",
+      mcpUrl: "http://localhost:4123/mcp",
+      binary,
+      timeoutMs: 5_000,
+      agentKind: "claude-code",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.agentResult).toEqual({ status: "success", reason: "done" });
+    await expect(fs.access(path.join(workspace, ".mcp.json"))).rejects.toBeDefined();
+    const args = await fs.readFile(path.join(workspace, "args.txt"), "utf-8").catch(() => "");
+    expect(args).not.toContain("--mcp-config");
   });
 
   test("returns null agentResult when envelope is_error and result missing", async () => {
@@ -250,7 +319,7 @@ describe("spawnAgent (claude-code adapter)", () => {
 
     expect(result.artifacts).toEqual({});
   });
-  test("S3: child process does not receive symphony service credentials from env", async () => {
+  test("child process does not receive symphony service credentials from env", async () => {
     const workspace = await makeTempDir();
     const binary = path.join(workspace, "env-probe.sh");
     await fs.writeFile(
@@ -300,8 +369,8 @@ describe("spawnAgent (claude-code adapter)", () => {
 
 });
 
-describe("spawnAgent A1 — stdout tail ring buffer", () => {
-  test("A1: parses result from last line when stdout has lots of padding", async () => {
+describe("spawnAgent — stdout tail ring buffer", () => {
+  test("parses result from last line when stdout has lots of padding", async () => {
     const workspace = await makeTempDir();
     const binary = path.join(workspace, "fat-stdout.sh");
 

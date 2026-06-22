@@ -37,6 +37,11 @@ class MockEventSource {
 }
 vi.stubGlobal("EventSource", MockEventSource);
 
+// Suppress real network calls from any API paths not intercepted by the module mock.
+// The components fire async requests on mount; a global fetch stub prevents unhandled
+// rejections when jsdom has no valid backend URL.
+vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })));
+
 describe("App entry", () => {
   beforeEach(() => {
     cleanup();

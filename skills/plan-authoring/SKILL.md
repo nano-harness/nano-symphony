@@ -107,3 +107,38 @@ sub-issue transitions.
 - Expand **Nodes** to see which DAG nodes are running, done, or failed.
 - Check `/api/v1/plan-runs/:id/journal` and `/api/v1/plan-runs/:id/nodes` for
 programmatic access.
+
+## CLI-first dispatch
+
+Plan scripts should be dispatched via the **Symphony CLI**. The CLI reads
+`SYMPHONY_MCP_URL` and `SYMPHONY_TOKEN` automatically and works in every runtime.
+Use the MCP JSON-RPC tools only when the agent cannot execute shell commands.
+
+### CLI: spawn a plan run and handoff
+
+```bash
+# Write plan script to a file
+cat > plan.js << 'EOF'
+phase("Research");
+const analysis = await issue("Analyse the auth module", {
+  schema: { type: "object", properties: { issues: { type: "array", items: { type: "string" } } }, required: ["issues"] }
+});
+
+phase("Fix");
+await parallel(analysis.issues.map(i => () => issue(`Fix: ${i}`)));
+EOF
+
+# Dispatch and handoff (pauses current issue until plan completes)
+symphony spawn-plan-run-and-handoff --script plan.js --meta-json '{"name":"Auth refactor","max_issues":10}'
+```
+
+### MCP fallback
+
+If the agent only supports MCP tools, use `symphony.spawn_plan_run_and_handoff`:
+
+```
+symphony.spawn_plan_run_and_handoff({ script: `...plan source...`, meta: { name: "Auth refactor", max_issues: 10 } })
+```
+
+Both approaches create a `plan_run_spawned` event and transition the issue to
+`awaiting_plan` while the plan runtime executes.

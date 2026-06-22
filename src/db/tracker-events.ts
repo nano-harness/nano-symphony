@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 import { nanoid } from "nanoid";
 import { bus } from "./event_bus.ts";
 import type { SymphonyEvent } from "./tracker-types.ts";
-export type { EventKind } from "./event-kinds.ts";
 
 export function createEventOps(db: Database) {
   const recordEventStmt = db.prepare(`

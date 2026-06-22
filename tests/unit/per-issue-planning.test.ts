@@ -9,76 +9,7 @@ function makeTracker() {
   return createTracker(db);
 }
 
-// Minimal workflow shape for orchestrator planning logic
-function makeWorkflow(planningEnabled: boolean, skipLabels: string[] = []) {
-  return {
-    workflow: {
-      agent: {
-        planning: {
-          enabled: planningEnabled,
-          skip_labels: skipLabels,
-        },
-      },
-    },
-    template: "",
-  };
-}
-
-// Re-implement the planning decision logic from orchestrator/index.ts for unit testing
-function shouldPlanIssue(
-  issue: { require_plan: boolean | null; labels: string[] },
-  wf: ReturnType<typeof makeWorkflow>,
-): boolean {
-  const planningConfig = wf.workflow.agent?.planning;
-  const globalPlanningEnabled = planningConfig?.enabled ?? false;
-  const skipLabels = planningConfig?.skip_labels ?? [];
-  const issueLabels = issue.labels ?? [];
-  const hasSkipLabel = skipLabels.some((sl: string) => issueLabels.includes(sl));
-
-  if (issue.require_plan === true) return true;
-  if (issue.require_plan === false) return false;
-  return globalPlanningEnabled && !hasSkipLabel;
-}
-
 describe("per-issue planning override", () => {
-  describe("orchestrator dispatch logic", () => {
-    test("require_plan: true + global disabled → should plan", () => {
-      const issue = { require_plan: true as boolean | null, labels: [] };
-      const wf = makeWorkflow(false);
-      expect(shouldPlanIssue(issue, wf)).toBe(true);
-    });
-
-    test("require_plan: false + global enabled → should not plan", () => {
-      const issue = { require_plan: false as boolean | null, labels: [] };
-      const wf = makeWorkflow(true);
-      expect(shouldPlanIssue(issue, wf)).toBe(false);
-    });
-
-    test("require_plan: null + global enabled → should plan (existing behavior)", () => {
-      const issue = { require_plan: null as boolean | null, labels: [] };
-      const wf = makeWorkflow(true);
-      expect(shouldPlanIssue(issue, wf)).toBe(true);
-    });
-
-    test("require_plan: null + global enabled + skip label → should not plan", () => {
-      const issue = { require_plan: null as boolean | null, labels: ["skip-plan"] };
-      const wf = makeWorkflow(true, ["skip-plan"]);
-      expect(shouldPlanIssue(issue, wf)).toBe(false);
-    });
-
-    test("require_plan: true + skip label present → should plan (explicit override wins)", () => {
-      const issue = { require_plan: true as boolean | null, labels: ["skip-plan"] };
-      const wf = makeWorkflow(true, ["skip-plan"]);
-      expect(shouldPlanIssue(issue, wf)).toBe(true);
-    });
-
-    test("require_plan: null + global disabled → should not plan", () => {
-      const issue = { require_plan: null as boolean | null, labels: [] };
-      const wf = makeWorkflow(false);
-      expect(shouldPlanIssue(issue, wf)).toBe(false);
-    });
-  });
-
   describe("DB round-trip for require_plan", () => {
     let tracker: ReturnType<typeof makeTracker>;
 

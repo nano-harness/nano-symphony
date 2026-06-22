@@ -123,6 +123,20 @@ export function createPlanRunOps(db: Database) {
     SELECT * FROM plan_runs WHERE caller_issue_uuid = ? ORDER BY created_at DESC
   `);
 
+  const listNeedingProgressSyncStmt = db.prepare(`
+    SELECT pr.* FROM plan_runs pr
+    WHERE pr.state NOT IN ('done', 'failed', 'cancelled')
+      OR (
+        pr.state IN ('done', 'failed', 'cancelled')
+        AND pr.caller_issue_uuid IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM issues i
+          WHERE i.uuid = pr.caller_issue_uuid
+            AND i.state NOT IN ('done', 'cancelled')
+        )
+      )
+  `);
+
   const upsertPlanRunNodeStmt = db.prepare(`
     INSERT INTO plan_run_nodes (run_id, node_key, issue_uuid, state, started_at, finished_at, result_json, error)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -218,6 +232,10 @@ export function createPlanRunOps(db: Database) {
     return listByCallerStmt.all(callerIssueId) as PlanRun[];
   }
 
+  function listPlanRunsNeedingProgressSync(): PlanRun[] {
+    return listNeedingProgressSyncStmt.all() as PlanRun[];
+  }
+
   function getPlanRunJournal(runId: string): JournalEntry[] {
     return readJournal(runId);
   }
@@ -264,6 +282,7 @@ export function createPlanRunOps(db: Database) {
     listFinalizedPlanRunsWithCaller,
     listExpiredRunningPlanRuns,
     listPlanRunsByCaller,
+    listPlanRunsNeedingProgressSync,
     getPlanRunJournal,
     upsertPlanRunNode,
     listPlanRunNodes,

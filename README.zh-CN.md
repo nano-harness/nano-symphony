@@ -36,7 +36,7 @@ nano-symphony 是一个轻量级的编码 Agent 编排服务。它使用 SQLite 
 ## 环境要求
 
 - [Bun](https://bun.sh/)：用于安装依赖、运行后端、执行测试和构建前端。
-- 一个兼容的编码 Agent 可执行文件，需要位于 `PATH` 中，或通过 `NANO_BIN` / 工作流配置指定。未显式配置时默认使用 `claude-code` 和 `claude` 二进制；如需使用 nano，请显式设置 `agent.kind: nano`。
+- 一个兼容的编码 Agent 可执行文件，需要位于 `PATH` 中，并通过工作流配置指定。未显式配置时默认使用 `claude-code` 和 `claude` 二进制；如需使用 nano，请显式设置 `agent.kind: nano`。
 
 ## 下载
 
@@ -163,12 +163,12 @@ bun run dev
 | `API_TOKEN` | *(自动生成)* | 保护 `/api/v1/*` 的共享密钥。**始终强制启用** — 若未设置则自动生成随机 UUID，API 默认不开放访问。设置固定值可在重启后保持 Token 不变。请通过 `Authorization: ******` 或 `X-Symphony-Token: <your-token>` 请求头传递（EventSource 也可使用 `?token=` 查询参数）。Token 会注入到控制台页面以实现自动认证。 |
 | `DB_PATH` | `./symphony.db` | SQLite 数据库路径。 |
 | `WORKFLOW_PATH` | `./WORKFLOW.md` | 工作流 Markdown 文件路径。 |
-| `NANO_BIN` | `claude` | 默认回退 Agent 二进制。 |
 | `WORKSPACE_ROOT` | `./workspaces` | 生成工作区的根目录。 |
 | `LOG_LEVEL` | `info` | Pino 日志级别。 |
 | `MAX_CONCURRENT_AGENTS` | `3` | 最大并发 Agent 运行数。 |
-| `MCP_TOKEN_TTL_MS` | `3600000` | MCP Token 有效期，单位毫秒。 |
-| `ORCHESTRATOR_TICK_MS` | `5000` | 编排器轮询间隔，单位毫秒。 |
+| `AGENT_TOKEN_TTL_MS` | `3600000` | Agent 会话 Token 有效期，单位毫秒。 |
+| `MCP_TOKEN_TTL_MS` | *(已弃用)* | `AGENT_TOKEN_TTL_MS` 的已弃用别名。 |
+| `ORCHESTRATOR_TICK_MS` | `1000` | 编排器轮询间隔，单位毫秒。 |
 
 ### 安全模型
 

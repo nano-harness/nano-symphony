@@ -4,11 +4,12 @@ import type { SymphonyRun } from "./tracker-types.ts";
 
 export function createRunOps(db: Database) {
   const claimIssueStmt = db.prepare(`
-    INSERT INTO symphony_runs (issue_uuid, next_attempt, last_state)
-    VALUES (?, ?, 'claimed')
+    INSERT INTO symphony_runs (issue_uuid, next_attempt, last_state, heartbeat_at)
+    VALUES (?, ?, 'claimed', ?)
     ON CONFLICT(issue_uuid) DO UPDATE SET
       next_attempt = excluded.next_attempt,
-      last_state = 'claimed'
+      last_state = 'claimed',
+      heartbeat_at = excluded.heartbeat_at
     WHERE last_state IN ('released', 'retry_queued')
   `);
 
@@ -50,10 +51,6 @@ export function createRunOps(db: Database) {
     UPDATE symphony_runs SET current_attempt = ? WHERE issue_uuid = ?
   `);
 
-  const recordPatchStmt = db.prepare(`
-    UPDATE symphony_runs SET last_patch = ? WHERE issue_uuid = ?
-  `);
-
   // S9: Track the agent PID in the DB so crash-restart can kill orphaned processes.
   const updateAgentPidStmt = db.prepare(`
     UPDATE symphony_runs SET agent_pid = ? WHERE issue_uuid = ?
@@ -78,7 +75,8 @@ export function createRunOps(db: Database) {
   }
 
   function claimIssue(issueUuid: string, attempt: number): boolean {
-    const result = claimIssueStmt.run(issueUuid, attempt);
+    const now = Date.now();
+    const result = claimIssueStmt.run(issueUuid, attempt, now);
     if (result.changes > 0) {
       bus.emit("run", { issue_uuid: issueUuid, next_attempt: attempt, last_state: "claimed" });
     }
@@ -130,10 +128,6 @@ export function createRunOps(db: Database) {
     bus.emit("run", { issue_uuid: issueUuid, current_attempt: attempt });
   }
 
-  function recordPatch(issueUuid: string, _attempt: number, patch: string | null): void {
-    recordPatchStmt.run(patch, issueUuid);
-  }
-
   // S9: Persist the live agent PID so crash-restart can identify and kill orphaned agents.
   function updateAgentPid(issueUuid: string, pid: number | null): void {
     updateAgentPidStmt.run(pid, issueUuid);
@@ -166,7 +160,6 @@ export function createRunOps(db: Database) {
     getRun,
     updateWorkspacePath,
     markCurrentAttempt,
-    recordPatch,
     updateAgentPid,
     updateHeartbeat,
     setHeartbeatTimeout,
