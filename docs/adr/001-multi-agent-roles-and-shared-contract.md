@@ -1,5 +1,7 @@
 # ADR 001: Multi-Agent Roles and Shared Contract Schema
 
+[中文](./001-multi-agent-roles-and-shared-contract.zh-CN.md)
+
 ## Status
 
 Proposed

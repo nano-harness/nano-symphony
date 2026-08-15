@@ -5,6 +5,8 @@ description: Use when you need to spin up nano-symphony locally and run a minima
 
 # nano-symphony Local Loop Quick Start
 
+[中文](./SKILL.zh-CN.md)
+
 ## Overview
 
 nano-symphony is a lightweight orchestration service that combines a local Bun/TypeScript backend with SQLite, an MCP server, and real agent subprocesses (nano or claude-code) running in sandboxes. The core loop is:

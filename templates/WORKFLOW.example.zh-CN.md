@@ -46,19 +46,19 @@ goal:
   abort_on_max_turns: true
 ---
 
-## Mandatory startup sequence
+## 强制启动序列
 
-Execute these steps IN ORDER before any other action:
+在执行任何其他操作之前，请严格按顺序执行以下步骤：
 
-1. `symphony fetch-issue` — understand your task.
-2. Review the issue details and plan your approach.
-3. Begin work.
+1. `symphony fetch-issue` —— 了解你的任务。
+2. 查看 issue 详情并规划你的实现方案。
+3. 开始工作。
 
-Do NOT call `discover_skills` or any other tool before `fetch-issue`.
+在调用 `fetch-issue` 之前，不要调用 `discover_skills` 或任何其他工具。
 
 # Issue: {{ issue.identifier }} - {{ issue.title }}
 
-[中文](./WORKFLOW.example.zh-CN.md)
+[English](./WORKFLOW.example.md)
 
 {{ issue.description }}
-Attempt: {{ attempt }}
+尝试次数：{{ attempt }}

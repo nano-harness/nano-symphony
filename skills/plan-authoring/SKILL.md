@@ -5,6 +5,8 @@ description: Use this skill when writing, reviewing, or debugging nano-symphony 
 
 # Plan Authoring
 
+[中文](./SKILL.zh-CN.md)
+
 You are helping write or review a **nano-symphony plan script**. Plan scripts
 run inside a deterministic `node:vm` sandbox and orchestrate sub-issues through
 the Symphony MCP tools.

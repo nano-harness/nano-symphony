@@ -1,6 +1,14 @@
 # nano-symphony
 
-[中文文档](./README.zh-CN.md)
+[中文](./README.zh-CN.md)
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?logo=typescript)](https://www.typescriptlang.org)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Bun](https://img.shields.io/badge/Bun-1.0+-000000?logo=bun)](https://bun.sh)
+
+> Lightweight orchestration for coding agents — SQLite state, MCP callbacks, web dashboard. The conductor for your [nano-agent](https://github.com/nano-harness/nano-agent) fleet.
+>
+> Part of the [nano series](https://nano-harness.github.io) — [nano-symphony](https://github.com/nano-harness/nano-symphony) · [nano-agent](https://github.com/nano-harness/nano-agent) · [nano-cloud](https://github.com/nano-harness/nano-cloud). Pairs with the [harness-101](https://github.com/albert-lv/harness-101) course.
 
 nano-symphony is a lightweight orchestration service for running coding-agent work on tracked issues. It stores issue state in SQLite, dispatches agent sessions into isolated workspaces, exposes an MCP server for agent callbacks, and includes a small web dashboard for observing runs and editing the workflow prompt.
 
@@ -143,10 +151,10 @@ For all versioned releases, see the [GitHub Releases](https://github.com/nano-ha
    ./scripts/init-project.sh
    ```
 
-   该脚本会在仓库根没有 `WORKFLOW.md` 时，从 `templates/WORKFLOW.example.md` 复制一份。
-   要自定义 prompt / sandbox / permission 等行为，直接编辑根目录的 `WORKFLOW.md`。
-   关于这些字段如何被解析与渲染，参见
-   [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
+   This script copies `templates/WORKFLOW.example.md` to `WORKFLOW.md` in the repository root when none exists.
+   To customize prompt / sandbox / permission behavior, edit the root `WORKFLOW.md` directly.
+   For how these fields are parsed and rendered, see
+   [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md).
 
 3. Start the backend service with the share root pointing to the project directory:
 
@@ -433,14 +441,14 @@ These tests verify:
 
 ## Troubleshooting
 
-### 改了 WORKFLOW.md 没生效
+### Changes to WORKFLOW.md not taking effect
 
-1. 检查日志是否出现 `workflow reloaded` 或 `workflow reload failed`。
-2. macOS 上 v0.8+ 默认启用 polling，但若仍不生效可设置 `SYMPHONY_WATCH_USE_POLLING=1`。
-3. 通过 `PUT /api/v1/workflow` 接口写入后会同步触发重载，不依赖 watcher。
-4. 若出现 `workflow reload failed`，检查 YAML front matter 语法。
+1. Check the logs for `workflow reloaded` or `workflow reload failed`.
+2. On macOS, polling is enabled by default since v0.8+, but if it still does not take effect you can set `SYMPHONY_WATCH_USE_POLLING=1`.
+3. Writing via the `PUT /api/v1/workflow` endpoint triggers a reload synchronously, independent of the watcher.
+4. If you see `workflow reload failed`, check the YAML front matter syntax.
 
-详细机制参见 [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
+For the detailed mechanics, see [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md).
 
 ## License
 

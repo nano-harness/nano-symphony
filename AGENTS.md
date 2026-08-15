@@ -1,5 +1,7 @@
 # AGENTS.md — nano-symphony
 
+[中文](./AGENTS.zh-CN.md)
+
 This file contains context for coding agents working on `nano-symphony`.
 
 ## Project overview

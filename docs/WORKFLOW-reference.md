@@ -1,5 +1,7 @@
 # WORKFLOW.md
 
+[中文](./WORKFLOW-reference.zh-CN.md)
+
 `WORKFLOW.md` is a Markdown file with YAML front matter. The front matter configures how nano-symphony runs nano-agent; the Markdown body is rendered into the agent prompt.
 
 This document highlights fields related to `permission_auto`, agent result delivery, and sandbox hardening.

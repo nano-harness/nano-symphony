@@ -1,5 +1,7 @@
 # Plan Authoring Guide
 
+[中文](./plan-authoring.zh-CN.md)
+
 Plan scripts let an agent decompose a task into smaller sub-issues that run in
 sequence, in parallel, or as a DAG. They are executed inside a deterministic
 `node:vm` sandbox.

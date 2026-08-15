@@ -1,8 +1,11 @@
-# WORKFLOW.md 内部机制
+# WORKFLOW.md Internals
 
-> 本文件说明 nano-symphony 在加载、解析与运行 `WORKFLOW.md` 时的内部约定。运行时配置文件
-> 本身位于仓库根 `WORKFLOW.md`，由 `scripts/init-project.sh` 从 `templates/WORKFLOW.example.md`
-> 兜底生成；如需自定义，请直接编辑根目录的 `WORKFLOW.md`。
+[中文](./WORKFLOW-INTERNALS.zh-CN.md)
+
+> This document describes nano-symphony's internal conventions for loading, parsing, and running
+> `WORKFLOW.md`. The runtime configuration file itself lives at the repository root as `WORKFLOW.md`,
+> generated as a fallback by `scripts/init-project.sh` from `templates/WORKFLOW.example.md`;
+> to customize it, edit the root `WORKFLOW.md` directly.
 
 ## 1. `agent.permission_auto` (pass-through, strict)
 
@@ -67,15 +70,15 @@ forwarded to the agent via `--add-dir`. The orchestrator no longer injects
 `~/.config/nano` or other mandatory read-only paths into `.nano.yaml`; the agent
 is responsible for its own sandbox defaults.
 
-## 5. WORKFLOW 文件生命周期与热重载
+## 5. WORKFLOW file lifecycle and hot reload
 
-- `init-project.sh` 在仓库根不存在 `WORKFLOW.md` 时从 `templates/WORKFLOW.example.md` 拷贝。
-- 运行时 chokidar 监听 `WORKFLOW.md` 变化触发热重载（macOS 默认启用 polling 兜底；可通过 `SYMPHONY_WATCH_USE_POLLING=0` 显式关闭）。
-- `PUT /api/v1/workflow` 写入后会同步触发重载，watcher 仅作兜底。
-- 重载成功/失败事件通过 `/api/v1/events/stream` 推送（kind: `workflow_reloaded` / `workflow_reload_failed`）。
+- `init-project.sh` copies `templates/WORKFLOW.example.md` to `WORKFLOW.md` when none exists at the repository root.
+- At runtime, chokidar watches `WORKFLOW.md` for changes and triggers a hot reload (on macOS, polling is enabled by default as a fallback; it can be explicitly disabled via `SYMPHONY_WATCH_USE_POLLING=0`).
+- Writes through `PUT /api/v1/workflow` trigger a reload synchronously; the watcher is only a fallback.
+- Reload success/failure events are pushed via `/api/v1/events/stream` (kind: `workflow_reloaded` / `workflow_reload_failed`).
 
-### Troubleshooting: 改了 WORKFLOW.md 没生效
+### Troubleshooting: changes to WORKFLOW.md not taking effect
 
-1. 检查日志是否出现 `workflow reloaded` 或 `workflow reload failed`。
-2. 若两者都没出现，说明 watcher 未感知到文件变化。macOS 上默认已启用 polling（v0.8+）；如仍不生效，确认 `SYMPHONY_WATCH_USE_POLLING=1` 已设置，或通过 `PUT /api/v1/workflow` 接口写入（该接口会同步触发重载）。
-3. 若出现 `workflow reload failed`，检查 YAML front matter 语法是否合法。
+1. Check the logs for `workflow reloaded` or `workflow reload failed`.
+2. If neither appears, the watcher did not detect the file change. On macOS, polling is enabled by default (v0.8+); if it still does not work, confirm `SYMPHONY_WATCH_USE_POLLING=1` is set, or write via the `PUT /api/v1/workflow` endpoint (which triggers a reload synchronously).
+3. If you see `workflow reload failed`, check that the YAML front matter syntax is valid.

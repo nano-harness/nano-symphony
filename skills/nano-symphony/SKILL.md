@@ -5,6 +5,8 @@ description: Use this skill when operating inside a nano-symphony orchestrated w
 
 # nano-symphony
 
+[中文](./SKILL.zh-CN.md)
+
 You are operating inside a nano-symphony orchestrated workspace. This skill documents the expected agent workflow. **Default to the `symphony` CLI**; the MCP tools are only a fallback for runtimes that cannot spawn shell processes.
 
 ## Installation
@@ -188,6 +190,7 @@ The following globals are injected into the plan script (no `require`/`import` n
 | `issue(prompt, opts?)` | Dispatch a sub-issue. Returns the issue's `emit_result.data` (schema-typed) or a string summary. |
 | `parallel(thunks)` | Run thunks concurrently. Returns an array of results in order. |
 | `pipeline(items, ...stages)` | Process each item through each stage sequentially. |
+| `dag(nodes, edges)` | Run a dependency graph of sub-issues layer-by-layer. Prompts may reference predecessor results via `{{nodeId}}`. |
 | `phase(title)` | Label the current phase (visible in dry_run_summary). |
 | `log(msg)` | Append a log message to the plan journal. |
 | `budget` | `{ total, spent(), remaining() }` — token budget tracking. |

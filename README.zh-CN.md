@@ -1,6 +1,6 @@
 # nano-symphony
 
-[English README](./README.md)
+[English](./README.md)
 
 nano-symphony 是一个轻量级的编码 Agent 编排服务。它使用 SQLite 保存 Issue 状态，为每个任务创建独立工作区，启动配置好的 Agent 进程，并通过 MCP 服务接收 Agent 的进度回报。同时，项目还提供一个简单的 Web 控制台，用于查看任务、运行状态、事件日志和编辑工作流提示词。
 
@@ -103,6 +103,11 @@ symphony update
    ```bash
    ./scripts/init-project.sh
    ```
+
+   该脚本会在仓库根没有 `WORKFLOW.md` 时，从 `templates/WORKFLOW.example.md` 复制一份。
+   要自定义 prompt / sandbox / permission 等行为，直接编辑根目录的 `WORKFLOW.md`。
+   关于这些字段如何被解析与渲染，参见
+   [`docs/WORKFLOW-INTERNALS.md`](docs/WORKFLOW-INTERNALS.md)。
 
    也可以手动执行等价命令：
 

@@ -1,5 +1,7 @@
 # Agent Exit Contract v1
 
+[中文](./agent-exit-contract.zh-CN.md)
+
 This document defines the standard contract for how agents communicate completion
 status to nano-symphony. All agent adapters must conform to this contract.
 
