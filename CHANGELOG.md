@@ -7,6 +7,13 @@ All notable changes to nano-symphony will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **MCP protocol version negotiation**: `src/mcp/protocol.ts` defines the supported versions (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`). On `initialize` the server echoes the client's requested version when supported, otherwise it responds with the latest supported version (`2025-11-25`) per the MCP spec, replacing the hardcoded `2024-11-05`. The 2026-07-28 stateless redesign is intentionally not adopted yet; see `docs/adr/002-mcp-protocol-version-negotiation.md`.
+- **MCP notification tolerance**: `notifications/*` requests (e.g. `notifications/initialized`) are now acknowledged with HTTP 202 and no JSON-RPC error.
+- **Regression tests**: `tests/unit/mcp-protocol.test.ts` covers version negotiation (echo / fallback) and notification tolerance.
+
 ## [0.9.6] - 2026-06-23
 
 ### Added

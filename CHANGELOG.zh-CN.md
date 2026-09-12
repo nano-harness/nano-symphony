@@ -7,6 +7,13 @@ nano-symphony 的所有重要变更都会记录在本文件中。
 本文件格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
 且本项目遵循 [语义化版本规范](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### Added
+- **MCP 协议版本协商**：`src/mcp/protocol.ts` 定义支持的版本列表（`2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25`）。`initialize` 时若客户端请求的版本受支持则回显该版本，否则按 MCP 规范返回服务器支持的最新版本（`2025-11-25`），取代原先硬编码的 `2024-11-05`。2026-07-28 的无状态化重构暂不适配，详见 `docs/adr/002-mcp-protocol-version-negotiation.zh-CN.md`。
+- **MCP 通知容忍**：`notifications/*` 请求（如 `notifications/initialized`）现在以 HTTP 202 确认，不再返回 JSON-RPC 错误。
+- **回归测试**：`tests/unit/mcp-protocol.test.ts` 覆盖版本协商（回显 / 回落）与通知容忍。
+
 ## [0.9.6] - 2026-06-23
 
 ### Added

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { readFileSync } from "fs";
 import { verifyToken } from "./auth.ts";
 import { handleTool, TOOL_DEFINITIONS } from "./tools.ts";
+import { negotiateProtocolVersion } from "./protocol.ts";
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
 
@@ -28,14 +29,24 @@ export function createMcpRouter(
     const auth = verifyToken(token);
     if (!auth) return c.json({ error: "Invalid token" }, 403);
 
-    const body = await c.req.json() as { method: string; id: unknown; params?: { name?: string; arguments?: unknown } };
+    const body = await c.req.json() as {
+      method: string;
+      id: unknown;
+      params?: { name?: string; arguments?: unknown; protocolVersion?: string };
+    };
+
+    // JSON-RPC notifications have no id and expect no response; per the MCP
+    // Streamable HTTP transport, acknowledge them with 202 Accepted.
+    if (body.method.startsWith("notifications/")) {
+      return c.body(null, 202);
+    }
 
     if (body.method === "initialize") {
       return c.json({
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          protocolVersion: "2024-11-05",
+          protocolVersion: negotiateProtocolVersion(body.params?.protocolVersion),
           capabilities: { tools: {} },
           serverInfo: { name: "nano-symphony", version: PACKAGE_VERSION },
         },
