@@ -7,6 +7,8 @@ export interface Artifact { id: string; issue_uuid: string; attempt: number; sou
 export interface PlanRun { id: string; caller_issue_uuid: string | null; script: string; meta: string; args: string | null; state: string; dry_run_summary: string | null; approval_status: string | null; approval_reason: string | null; approved_at: number | null; approved_by: string | null; result: string | null; wall_time_ms: number; started_at: number | null; created_at: number; finished_at: number | null; }
 export interface JournalEntry { type: "phase" | "issue_start" | "issue_done" | "issue_error" | "log" | "parallel_start" | "parallel_done" | "dag_start" | "dag_done" | "dag_error"; ts: number; payload: Record<string, unknown>; }
 export interface PlanRunNode { run_id: string; node_key: string; issue_uuid: string | null; state: string; started_at: number | null; finished_at: number | null; result_json: string | null; error: string | null; }
+export interface PlanRunIssueUsage { issue_uuid: string; identifier: string; state: string; attempts: number; input_tokens: number; output_tokens: number; cost_usd: number; }
+export interface PlanRunUsage { id: string; issue_count: number; total: { attempts: number; input_tokens: number; output_tokens: number; cost_usd: number }; consistency: { terminal_issues: number; done_issues: number; first_attempt_successes: number; first_attempt_success_rate: number | null }; issues: PlanRunIssueUsage[]; }
 export interface LlmCall { id: string; issue_uuid: string; attempt: number; provider: string | null; model: string | null; input_tokens: number; output_tokens: number; cost_usd: number | null; duration_ms: number | null; duration_api_ms: number | null; created_at: number; }
 export interface PlanStep { id: string; title: string; description?: string; }
 export interface PlanEstimates { files_touched?: number; complexity?: string; estimated_turns?: number; }
@@ -141,6 +143,9 @@ export const api = {
   },
   async getPlanRunNodes(id: string): Promise<{ id: string; nodes: PlanRunNode[] }> {
     return request<{ id: string; nodes: PlanRunNode[] }>(`${BASE}/plan-runs/${id}/nodes`);
+  },
+  async getPlanRunUsage(id: string): Promise<PlanRunUsage> {
+    return request<PlanRunUsage>(`${BASE}/plan-runs/${id}/usage`);
   },
   async getLlmCalls(issueUuid: string): Promise<{ issue_uuid: string; calls: LlmCall[] }> {
     return request<{ issue_uuid: string; calls: LlmCall[] }>(`${BASE}/issues/${issueUuid}/llm-calls`);

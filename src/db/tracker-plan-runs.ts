@@ -43,6 +43,16 @@ export type PlanRunState =
 
 export type PlanRunApprovalStatus = "pending" | "approved" | "rejected";
 
+export interface PlanRunIssueUsage {
+  issue_uuid: string;
+  identifier: string;
+  state: string;
+  attempts: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
 export const PLAN_RUN_WALL_TIME_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export function createPlanRunOps(db: Database) {
@@ -151,6 +161,25 @@ export function createPlanRunOps(db: Database) {
 
   const listPlanRunNodesStmt = db.prepare(`
     SELECT * FROM plan_run_nodes WHERE run_id = ? ORDER BY started_at ASC, node_key ASC
+  `);
+
+  // Per-issue usage rollup for a plan run. One llm_calls row is recorded per
+  // worker attempt, so COUNT(l.id) approximates the attempt count used for
+  // first-attempt-success (pass@1-style) reporting.
+  const planRunUsageStmt = db.prepare(`
+    SELECT
+      i.uuid AS issue_uuid,
+      i.identifier AS identifier,
+      i.state AS state,
+      COUNT(l.id) AS attempts,
+      COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(l.cost_usd), 0) AS cost_usd
+    FROM issues i
+    LEFT JOIN llm_calls l ON l.issue_uuid = i.uuid
+    WHERE i.plan_run_id = ?
+    GROUP BY i.uuid
+    ORDER BY i.created_at ASC
   `);
 
   function insertPlanRun(run: {
@@ -266,6 +295,10 @@ export function createPlanRunOps(db: Database) {
     return listPlanRunNodesStmt.all(runId) as PlanRunNode[];
   }
 
+  function getPlanRunUsage(runId: string): PlanRunIssueUsage[] {
+    return planRunUsageStmt.all(runId) as PlanRunIssueUsage[];
+  }
+
   return {
     insertPlanRun,
     getPlanRun,
@@ -286,5 +319,6 @@ export function createPlanRunOps(db: Database) {
     getPlanRunJournal,
     upsertPlanRunNode,
     listPlanRunNodes,
+    getPlanRunUsage,
   };
 }

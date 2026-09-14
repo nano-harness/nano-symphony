@@ -4,6 +4,15 @@
 
 nano-symphony 是一个轻量级的编码 Agent 编排服务。它使用 SQLite 保存 Issue 状态，为每个任务创建独立工作区，启动配置好的 Agent 进程，并通过 MCP 服务接收 Agent 的进度回报。同时，项目还提供一个简单的 Web 控制台，用于查看任务、运行状态、事件日志和编辑工作流提示词。
 
+## 定位：马具与循环工程
+
+nano 系列将 Agent 基础设施分为两层：
+
+- **马具（Harness）**：围绕单个 Agent 的工程化环境——工具、沙箱、提示词构建、上下文管理与退出契约。这一层由 [nano-agent](https://github.com/nano-harness/nano-agent) 承担。
+- **循环工程（Loop engineering）**：马具之上的可重复系统——按调度运行 Agent、投喂工作、检查结果、决定下一步。nano-symphony 就是这一层：基于 tick 的调度器认领候选 Issue，将带马具的 Agent 派发到隔离工作区，校验 Agent 回传的压缩结果摘要，并把 Issue 路由到重试、交接或终态。
+
+两层的先后顺序很重要：循环会放大底层马具的一切行为，在脆弱的马具上叠加循环只会倍增失败。因此 nano-symphony 把 Agent 视为遵守严格[退出契约](docs/standards/agent-exit-contract.zh-CN.md)的黑盒，并用进程实际结果交叉校验 Agent 上报的每一项结论（见 `src/orchestrator/worker.ts` 中的 `deriveCompletion`）。编排模型（单写者派发、子代理隔离、压缩摘要）的审计见 [ADR 003](docs/adr/003-orchestration-convergence-audit.zh-CN.md)；成本与可靠性度量见 [docs/metrics-cost-and-reliability.zh-CN.md](docs/metrics-cost-and-reliability.zh-CN.md)。
+
 ## 功能特性
 
 - **Issue 跟踪 API**：通过 HTTP 接口创建、列出、更新和查看本地 Issue。

@@ -1,6 +1,7 @@
 import type { Tracker } from "../db/tracker.ts";
 import type { Workflow } from "../workflow/types.ts";
 import { runWorker, type WorkerContext } from "./worker.ts";
+import { cancelAgent } from "../spawner/index.ts";
 import { config } from "../config.ts";
 import type { Logger } from "pino";
 import { tickPendingPlans, tickApprovedPlans, tickFinalizedPlans, tickExpiredPlans } from "./plan-tick.ts";
@@ -118,9 +119,13 @@ export function createOrchestrator(
     const staleThreshold = Date.now() - config.AGENT_HEARTBEAT_TIMEOUT_MS;
     const staleRuns = tracker.fetchStaleRuns(staleThreshold);
     for (const staleRun of staleRuns) {
+      // Kill any lingering agent process before releasing the run. Without this,
+      // a re-claimed issue could spawn a second agent into the same workspace
+      // while the original (unresponsive) process is still alive.
+      const killed = cancelAgent(staleRun.issue_uuid);
       tracker.withTransaction(() => {
         tracker.releaseIssue(staleRun.issue_uuid, "released");
-        tracker.recordEvent(staleRun.issue_uuid, "stale_run_detected", `Run claimed for ${staleRun.current_attempt} turns was abandoned (no heartbeat)`, { attempt: staleRun.current_attempt });
+        tracker.recordEvent(staleRun.issue_uuid, "stale_run_detected", `Run claimed for ${staleRun.current_attempt} turns was abandoned (no heartbeat)`, { attempt: staleRun.current_attempt, agent_killed: killed });
         const issue = tracker.getIssue(staleRun.issue_uuid);
         if (issue && (issue.state === "in_progress" || issue.state === "awaiting_plan")) {
           tracker.updateIssueState(staleRun.issue_uuid, "todo");

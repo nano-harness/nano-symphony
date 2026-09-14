@@ -1,6 +1,6 @@
 import { createSignal, createEffect, createMemo, onMount, onCleanup, For, Show } from "solid-js";
 import { useParams, useNavigate, A } from "@solidjs/router";
-import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment, type PlanRun, type JournalEntry, type PlanRunNode, type LlmCall } from "./api";
+import { api, type Issue, type SymphonyEvent, type SymphonyRun, type Comment, type PlanRun, type JournalEntry, type PlanRunNode, type PlanRunUsage, type LlmCall } from "./api";
 import { IssueModal } from "./IssueModal";
 import { HandoffPanel } from "./HandoffPanel";
 import { PlanReviewPanel } from "./PlanReviewPanel";
@@ -588,6 +588,7 @@ export function IssueDetail() {
                           </details>
                         </div>
                       </Show>
+                      <PlanRunUsagePanel runId={pr.id} />
                       <PlanRunNodes runId={pr.id} />
                       <PlanRunJournal runId={pr.id} />
                     </div>
@@ -987,6 +988,69 @@ function PlanRunJournal(props: { runId: string }) {
               )}
             </For>
           </ul>
+        </Show>
+      </details>
+    </div>
+  );
+}
+
+function PlanRunUsagePanel(props: { runId: string }) {
+  const [usage, setUsage] = createSignal<PlanRunUsage | null>(null);
+  const [loaded, setLoaded] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const load = async () => {
+    if (loaded()) return;
+    try {
+      const res = await api.getPlanRunUsage(props.runId);
+      setUsage(res);
+      setLoaded(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const formatTokens = (n: number) => n.toLocaleString();
+  const formatCost = (n: number) => (n > 0 ? `$${n.toFixed(4)}` : "—");
+
+  return (
+    <div class="plan-run-summary">
+      <details onToggle={(e) => { if ((e.currentTarget as HTMLDetailsElement).open) load(); }}>
+        <summary>Usage &amp; consistency</summary>
+        <Show when={error()}>
+          <p style={{ color: "var(--error)", "font-size": "12px" }}>{error()}</p>
+        </Show>
+        <Show when={!error() && usage()}>
+          <div class="progress-stats" style={{ "margin-top": "8px" }}>
+            <span>{usage()!.issue_count} issues</span>
+            <span>{usage()!.total.attempts} attempts</span>
+            <span>{formatTokens(usage()!.total.input_tokens)} in / {formatTokens(usage()!.total.output_tokens)} out</span>
+            <span>{formatCost(usage()!.total.cost_usd)}</span>
+            <Show when={usage()!.consistency.first_attempt_success_rate !== null}>
+              <span>
+                first-attempt success {usage()!.consistency.first_attempt_successes}/{usage()!.consistency.terminal_issues}
+                {" "}({Math.round((usage()!.consistency.first_attempt_success_rate ?? 0) * 100)}%)
+              </span>
+            </Show>
+          </div>
+          <Show when={usage()!.issues.length > 0}>
+            <ul class="journal-list">
+              <For each={usage()!.issues}>
+                {(row) => (
+                  <li class="journal-entry">
+                    <span class={`pill ${row.state}`}>{row.state}</span>
+                    <span class="journal-title">{row.identifier}</span>
+                    <span class="journal-time">
+                      {row.attempts} att · {formatTokens(row.input_tokens + row.output_tokens)} tok · {formatCost(row.cost_usd)}
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+          <Show when={usage()!.issues.length === 0}>
+            <p style={{ color: "var(--mute)", "font-size": "12px" }}>No sub-issues recorded for this run yet.</p>
+          </Show>
         </Show>
       </details>
     </div>

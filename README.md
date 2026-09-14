@@ -12,6 +12,15 @@
 
 nano-symphony is a lightweight orchestration service for running coding-agent work on tracked issues. It stores issue state in SQLite, dispatches agent sessions into isolated workspaces, exposes an MCP server for agent callbacks, and includes a small web dashboard for observing runs and editing the workflow prompt.
 
+## Positioning: harness vs. loop engineering
+
+The nano series separates two layers of agent infrastructure:
+
+- **Harness** — the engineered environment around a single agent: tools, sandboxing, prompt construction, context management, and the exit contract. This layer is provided by [nano-agent](https://github.com/nano-harness/nano-agent).
+- **Loop engineering** — the repeatable system above the harness: running agents on a schedule, feeding them work, checking results, and deciding the next step. nano-symphony is this layer. Its tick-based dispatcher claims candidate issues, spawns harnessed agents into isolated workspaces, validates the compressed result summary each agent returns, and routes the issue to retry, handoff, or a terminal state.
+
+The ordering matters: a loop amplifies whatever the harness underneath it does, so stacking loops on a fragile harness only multiplies failures. nano-symphony therefore treats the agent as a black box with a strict [exit contract](docs/standards/agent-exit-contract.md) and cross-validates every claimed result against the process outcome (see `deriveCompletion` in `src/orchestrator/worker.ts`). The orchestration model — single-writer dispatch, isolated sub-agents, compressed summaries — is audited in [ADR 003](docs/adr/003-orchestration-convergence-audit.md); cost and reliability measurement is described in [docs/metrics-cost-and-reliability.md](docs/metrics-cost-and-reliability.md).
+
 ## Features
 
 - **Issue tracking API**: create, list, update, and inspect local issues through HTTP endpoints.

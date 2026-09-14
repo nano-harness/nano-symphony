@@ -67,6 +67,41 @@ export function createPlanRunsRoutes(
     return c.json({ id, nodes });
   });
 
+  app.get("/plan-runs/:id/usage", (c) => {
+    const id = c.req.param("id");
+    const run = tracker.getPlanRun(id);
+    if (!run) return c.json({ error: "Not found" }, 404);
+
+    const issues = tracker.getPlanRunUsage(id);
+    const total = issues.reduce(
+      (acc, row) => ({
+        attempts: acc.attempts + row.attempts,
+        input_tokens: acc.input_tokens + row.input_tokens,
+        output_tokens: acc.output_tokens + row.output_tokens,
+        cost_usd: acc.cost_usd + row.cost_usd,
+      }),
+      { attempts: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 },
+    );
+
+    // pass@1-style consistency: of the issues that reached a terminal state,
+    // how many succeeded on the first attempt (no retries).
+    const terminal = issues.filter((row) => ["done", "cancelled", "blocked"].includes(row.state));
+    const firstAttemptSuccesses = issues.filter((row) => row.state === "done" && row.attempts <= 1).length;
+
+    return c.json({
+      id,
+      issue_count: issues.length,
+      total,
+      consistency: {
+        terminal_issues: terminal.length,
+        done_issues: issues.filter((row) => row.state === "done").length,
+        first_attempt_successes: firstAttemptSuccesses,
+        first_attempt_success_rate: terminal.length > 0 ? firstAttemptSuccesses / terminal.length : null,
+      },
+      issues,
+    });
+  });
+
   app.get("/plan-runs/:id/result", async (c) => {
     const id = c.req.param("id");
     const run = tracker.getPlanRun(id);
