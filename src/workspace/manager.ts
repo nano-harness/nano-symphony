@@ -58,6 +58,19 @@ export interface EnsureResult {
   managed: boolean;
 }
 
+/**
+ * Resolves a user-provided workspace override to the absolute path that
+ * ensureWorkspace would use, without touching the filesystem. The dispatcher
+ * relies on this to compare workspace paths across issues.
+ */
+export function resolveWorkspacePath(overridePath: string, rootOverride?: string): string {
+  const root = rootOverride?.trim() || config.WORKSPACE_ROOT;
+  const expanded = expandHome(overridePath.trim());
+  return path.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : path.resolve(root, expanded);
+}
+
 export async function ensureWorkspace(
   identifier: string,
   overridePath?: string | null,
@@ -68,10 +81,7 @@ export async function ensureWorkspace(
   const override = overridePath?.trim();
   if (override) {
     // User-provided path
-    const expanded = expandHome(override);
-    const wsPath = path.isAbsolute(expanded)
-      ? path.resolve(expanded)
-      : path.resolve(root, expanded);
+    const wsPath = resolveWorkspacePath(override, root);
     // Create if missing (mkdir -p fallback for user convenience)
     await fs.mkdir(wsPath, { recursive: true });
     return { path: wsPath, managed: false };   // external: do NOT init git

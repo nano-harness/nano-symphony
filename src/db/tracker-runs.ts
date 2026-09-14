@@ -2,6 +2,12 @@ import type { Database } from "bun:sqlite";
 import { bus } from "./event_bus.ts";
 import type { SymphonyRun } from "./tracker-types.ts";
 
+export interface ActiveWorkspacePath {
+  issue_uuid: string;
+  run_workspace_path: string | null;
+  issue_workspace_path: string | null;
+}
+
 export function createRunOps(db: Database) {
   const claimIssueStmt = db.prepare(`
     INSERT INTO symphony_runs (issue_uuid, next_attempt, last_state, heartbeat_at)
@@ -41,6 +47,19 @@ export function createRunOps(db: Database) {
 
   const getActiveRunsStmt = db.prepare(`
     SELECT * FROM symphony_runs WHERE last_state NOT IN ('released')
+  `);
+
+  // Cross-issue workspace mutual exclusion: expose the workspace each active
+  // (non-released) run occupies. run.workspace_path is the resolved absolute
+  // path once the worker started; before that, fall back to the issue's raw
+  // workspace_path so a just-claimed run still holds its workspace.
+  const getActiveWorkspacePathsStmt = db.prepare(`
+    SELECT symphony_runs.issue_uuid AS issue_uuid,
+           NULLIF(symphony_runs.workspace_path, '') AS run_workspace_path,
+           NULLIF(issues.workspace_path, '') AS issue_workspace_path
+    FROM symphony_runs
+    JOIN issues ON issues.uuid = symphony_runs.issue_uuid
+    WHERE symphony_runs.last_state NOT IN ('released')
   `);
 
   const updateWorkspacePathStmt = db.prepare(`
@@ -112,6 +131,10 @@ export function createRunOps(db: Database) {
     return runs.map(hydrateRun);
   }
 
+  function getActiveWorkspacePaths(): ActiveWorkspacePath[] {
+    return getActiveWorkspacePathsStmt.all() as ActiveWorkspacePath[];
+  }
+
   function getRun(issueUuid: string): SymphonyRun | null {
     const run = getRunStmt.get(issueUuid) as (Omit<SymphonyRun, "workspace_managed" | "current_attempt"> & { workspace_managed: number; current_attempt: number | null }) | null;
     if (!run) return null;
@@ -157,6 +180,7 @@ export function createRunOps(db: Database) {
     fetchDueRetries,
     updateTokenStats,
     getActiveRuns,
+    getActiveWorkspacePaths,
     getRun,
     updateWorkspacePath,
     markCurrentAttempt,

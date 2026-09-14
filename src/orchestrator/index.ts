@@ -6,6 +6,7 @@ import { config } from "../config.ts";
 import type { Logger } from "pino";
 import { tickPendingPlans, tickApprovedPlans, tickFinalizedPlans, tickExpiredPlans } from "./plan-tick.ts";
 import { syncParentPlanRunProgress } from "./plan-progress.ts";
+import { resolveWorkspacePath } from "../workspace/manager.ts";
 
 export class Semaphore {
   private max: number;
@@ -60,6 +61,62 @@ export interface Orchestrator {
   stop(): Promise<void>;
   kick(): void;
   getConcurrencyStatus(): { limit: number; available: number; active: number };
+}
+
+export interface WorkspaceConflict {
+  workspace_path: string;
+  conflicting_issue_uuid: string;
+}
+
+/**
+ * Cross-issue mutual exclusion for external workspaces: returns the active
+ * (non-released) run occupying the workspace the candidate issue points at,
+ * or null when the workspace is free. The active set mirrors the run
+ * lifecycle used by getActiveRuns — claimed and retry_queued runs hold their
+ * workspace; released runs (normal completion, cancellation, stale release)
+ * free it. Path comparison uses the same resolution as ensureWorkspace, so
+ * absolute, relative, and ~/ forms of the same directory all conflict.
+ */
+export function findWorkspaceConflict(
+  tracker: Tracker,
+  issueUuid: string,
+  workspaceOverride: string,
+  workspaceRoot?: string,
+): WorkspaceConflict | null {
+  const target = resolveWorkspacePath(workspaceOverride, workspaceRoot);
+  for (const active of tracker.getActiveWorkspacePaths()) {
+    if (active.issue_uuid === issueUuid) continue;
+    const activePath = active.run_workspace_path
+      ?? (active.issue_workspace_path?.trim()
+        ? resolveWorkspacePath(active.issue_workspace_path, workspaceRoot)
+        : null);
+    if (activePath !== null && activePath === target) {
+      return { workspace_path: target, conflicting_issue_uuid: active.issue_uuid };
+    }
+  }
+  return null;
+}
+
+// Throttle workspace_conflict_skipped events so an issue waiting on a busy
+// workspace does not append a new event on every tick.
+const WORKSPACE_CONFLICT_EVENT_INTERVAL_MS = 60_000;
+
+export function recordWorkspaceConflictSkipped(tracker: Tracker, issueUuid: string, conflict: WorkspaceConflict): void {
+  const last = tracker.getLatestEventByKind(issueUuid, "workspace_conflict_skipped");
+  if (last && Date.now() - last.ts < WORKSPACE_CONFLICT_EVENT_INTERVAL_MS) {
+    try {
+      const payload = JSON.parse(last.payload_json ?? "{}") as { conflicting_issue_uuid?: string };
+      if (payload.conflicting_issue_uuid === conflict.conflicting_issue_uuid) return;
+    } catch {
+      // Unparseable payload — fall through and record a fresh event.
+    }
+  }
+  tracker.recordEvent(
+    issueUuid,
+    "workspace_conflict_skipped",
+    `Dispatch deferred: workspace ${conflict.workspace_path} is in use by issue ${conflict.conflicting_issue_uuid}`,
+    { workspace_path: conflict.workspace_path, conflicting_issue_uuid: conflict.conflicting_issue_uuid },
+  );
 }
 
 export function createOrchestrator(
@@ -135,16 +192,32 @@ export function createOrchestrator(
     }
 
     for (const { issueUuid, attempt } of toDispatch) {
-      const claimed = tracker.withTransaction(() => {
+      const claimResult = tracker.withTransaction(() => {
         // Configure per-run heartbeat timeout so stale detection honors the env config.
         tracker.setHeartbeatTimeout(issueUuid, config.AGENT_HEARTBEAT_TIMEOUT_MS);
+        // Cross-issue workspace mutual exclusion: skip candidates whose external
+        // workspace_path collides with an active run. Checked inside the claim
+        // transaction so it cannot race a concurrent claim on the same database.
+        const wsOverride = tracker.getIssue(issueUuid)?.workspace_path?.trim();
+        if (wsOverride) {
+          const conflict = findWorkspaceConflict(tracker, issueUuid, wsOverride, wf.workflow.workspace?.root);
+          if (conflict) return { claimed: false, conflict };
+        }
         const claimed = tracker.claimIssue(issueUuid, attempt);
         // Seed heartbeat_at so the run is not considered stale before the first
         // process-level heartbeat fires (nano 30s / claude 60s).
         if (claimed) tracker.updateHeartbeat(issueUuid, Date.now());
-        return claimed;
+        return { claimed, conflict: null };
       });
-      if (!claimed) continue; // Already claimed by another tick
+      if (claimResult.conflict) {
+        recordWorkspaceConflictSkipped(tracker, issueUuid, claimResult.conflict);
+        logger.warn(
+          { issueUuid, workspacePath: claimResult.conflict.workspace_path, conflictingIssueUuid: claimResult.conflict.conflicting_issue_uuid },
+          "Dispatch deferred: workspace in use by another active run",
+        );
+        continue;
+      }
+      if (!claimResult.claimed) continue; // Already claimed by another tick
 
       const ctx: WorkerContext = {
         tracker,

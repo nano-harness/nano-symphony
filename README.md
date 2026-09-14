@@ -365,6 +365,7 @@ For issues that require integration with external development environments, you 
 - The path can be absolute, relative, or use `~` for home directory expansion.
 - If the path doesn't exist, symphony will create it (mkdir -p).
 - Leave `workspace_path` empty or null to use default managed workspaces.
+- One workspace, one active run: if another issue's active run already occupies the same external path, the dispatcher defers the new issue (no error) and records a `workspace_conflict_skipped` event; it is dispatched automatically once the workspace is free.
 - The workspace badge in the dashboard shows whether a workspace is "managed" or "external".
 
 ### Diff in handoff review

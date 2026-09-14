@@ -13,8 +13,8 @@ the orchestrator holds the full context and the plan; sub-agents run in
 isolation, are mostly read-only against shared state, and return compressed
 summaries instead of full trajectories; writes to shared state stay
 single-threaded. This ADR records an audit of `src/orchestrator/` and
-`src/spawner/` against that shape, the one low-risk gap it found and fixed,
-and the gaps that are documented but deliberately not addressed here.
+`src/spawner/` against that shape, the gaps it found and fixed across two
+rounds, and the gaps that are documented but deliberately not addressed.
 
 nano-symphony sits in the "loop engineering" layer above the agent harness
 (see README, "Positioning"): it schedules runs, feeds work, checks results,
@@ -71,13 +71,29 @@ and decides the next step. The audit questions were:
   (`src/orchestrator/index.ts`), and records `agent_killed` in the
   `stale_run_detected` event payload.
 
-### Gaps documented but not addressed (high-risk or large changes)
+### Gap fixed in the follow-up round
 
-- **Shared external workspaces.** Two issues may point at the same
-  `workspace_path`; there is no cross-issue mutual exclusion on the
-  filesystem. Operators are expected to treat external workspaces as
-  single-issue. A workspace-level lock table is a possible future change but
-  touches dispatch, cancellation, and cleanup semantics.
+- **Shared external workspaces had no cross-issue mutual exclusion.** Two
+  issues could point at the same `workspace_path` and be dispatched in
+  parallel, producing two writers on one directory. The dispatch loop now
+  runs a workspace-conflict guard inside the claim transaction
+  (`findWorkspaceConflict` in `src/orchestrator/index.ts`): before claiming a
+  candidate whose issue sets an external `workspace_path`, the path is
+  resolved exactly the way `ensureWorkspace` resolves it (absolute, relative,
+  and `~` forms compare equal) and matched against the workspaces of all
+  active runs (`tracker.getActiveWorkspacePaths` in `src/db/tracker-runs.ts`).
+  The active set mirrors the run lifecycle — `claimed` and `retry_queued`
+  runs hold their workspace (a run that has been claimed but whose worker has
+  not started yet still holds it via the issue's `workspace_path`), while
+  `released` runs free it, so the stale-release path unblocks waiting issues
+  on the next tick. On conflict the candidate is skipped for this tick — no
+  claim, no error — and a throttled `workspace_conflict_skipped` event
+  (at most one per minute per conflicting issue) records the workspace and
+  the conflicting issue UUID. No schema change: the guard is a read-only
+  query over `symphony_runs` joined with `issues`. Issues without
+  `workspace_path` are unaffected.
+
+### Gaps documented but not addressed (high-risk or large changes)
 - **Worker completion after a stale release.** If a stale-released worker
   later finishes, its completion transaction can still apply a state
   transition to an issue that has since been re-claimed. The window is narrow
@@ -97,8 +113,10 @@ and decides the next step. The audit questions were:
    this round).
 3. Keep the compressed `AgentResultSummary` contract as the only channel for
    sub-agent outcomes; trajectories stay in log files, not in the database.
-4. Defer workspace-level mutual exclusion and claim fencing; revisit if
-   multi-writer workspace sharing becomes a supported feature.
+4. Enforce cross-issue mutual exclusion on external workspaces with a
+   query-based guard inside the claim transaction (implemented in the
+   follow-up round); no lock table, no schema change. Defer claim fencing;
+   revisit if multi-writer workspace sharing becomes a supported feature.
 
 ## Consequences
 
@@ -108,6 +126,9 @@ and decides the next step. The audit questions were:
   processes on one database, because it lives in SQLite, not in memory.
 - A re-dispatched issue can no longer meet a zombie agent still writing to
   its workspace.
+- Two issues configured with the same external `workspace_path` can no
+  longer run concurrently; the later one waits and its deferral is visible
+  as a `workspace_conflict_skipped` event.
 - Control-plane state stays small and queryable; heavy output stays on disk.
 
 ### Negative
@@ -115,8 +136,10 @@ and decides the next step. The audit questions were:
 - `cancelAgent` uses SIGTERM with a 3-second SIGKILL escalation; a process
   that ignores both (unkillable state, NFS hang) can still outlive the
   release. This is a best-effort mitigation, not a hard guarantee.
-- Operators sharing one external workspace across issues receive no
-  protection beyond documentation.
+- The workspace guard compares resolved path strings, so aliasing the same
+  directory through symlinks or bind mounts is not detected; the guard is
+  also advisory across processes that do not share the same SQLite
+  database.
 
 ## Related Documents
 
@@ -126,3 +149,4 @@ and decides the next step. The audit questions were:
 - `docs/standards/agent-exit-contract.md`
 - `docs/metrics-cost-and-reliability.md`
 - `tests/unit/heartbeat-stale.test.ts`, `tests/unit/concurrency.test.ts`
+- `tests/unit/workspace-mutex.test.ts`, `tests/integration/dispatch.test.ts`

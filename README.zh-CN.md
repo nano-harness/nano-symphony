@@ -329,6 +329,7 @@ Attempt: {{ attempt }}
 - 路径可以是绝对路径、相对路径，或使用 `~` 表示家目录。
 - 若路径不存在，symphony 会自动创建（mkdir -p）。
 - 将 `workspace_path` 设为空或 null 则使用默认受管工作区。
+- 一个工作区同一时间只允许一个活跃 run：若另一个 Issue 的活跃 run 已占用相同外部路径，调度器会延迟派发新 Issue（不报错），并记录一条 `workspace_conflict_skipped` 事件；工作区空闲后会自动派发。
 - 控制台中的工作区标签会显示工作区是"受管"还是"外部"。
 
 ### Handoff Review 中的 Diff
