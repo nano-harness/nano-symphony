@@ -1,0 +1,6 @@
+[test]
+# Exclude frontend tests from bun test - they should be run with vitest
+# Bun resolves paths relative to each package, so we use wildcards
+exclude = ["**/frontend/**/*", "frontend/**"]
+timeout = 60000
+preload = ["./tests/test-setup.ts"]

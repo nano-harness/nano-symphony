@@ -1,0 +1,95 @@
+export interface Issue {
+  id: number;
+  uuid: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  priority: string;
+  state: string;
+  branch: string | null;
+  url: string | null;
+  workspace_path: string | null;
+  agent_kind: "nano" | "claude-code" | null;
+  agent_binary: string | null;
+  agent_role: string | null;
+  require_plan: boolean | null;
+  plan_run_id: string | null;
+  expected_schema: string | null;
+  scratchpad: string | null;
+  plan_estimates_json: string | null;
+  plan_actuals_json: string | null;
+  plan_progress_json: string | null;
+  cost_budget_usd: number | null;
+  token_budget: number | null;
+  cost_usd: number | null;
+  token_total: number | null;
+  created_at: string;
+  updated_at: string;
+  labels: string[];
+  blockers: Array<{ blocker_uuid: string; blocker_state: string }>;
+}
+
+export interface IssueInput {
+  uuid: string;
+  identifier?: string | null;
+  title: string;
+  description?: string | null;
+  priority?: string;
+  state: string;
+  branch?: string | null;
+  url?: string | null;
+  workspace_path?: string | null;
+  agent_kind?: "nano" | "claude-code" | null;
+  agent_binary?: string | null;
+  agent_role?: string | null;
+  require_plan?: boolean | null;
+  plan_run_id?: string | null;
+  expected_schema?: string | null;
+  scratchpad?: string | null;
+  plan_estimates_json?: string | null;
+  plan_actuals_json?: string | null;
+  plan_progress_json?: string | null;
+  cost_budget_usd?: number | null;
+  token_budget?: number | null;
+  labels?: string[];
+}
+
+export interface SymphonyRun {
+  issue_uuid: string;
+  next_attempt: number;
+  current_attempt: number | null;
+  last_state: string;
+  last_issue_state: string;
+  workspace_path: string;
+  workspace_managed: boolean;
+  next_due_ts: number | null;
+  last_event: string | null;
+  last_event_ts: number | null;
+  last_error: string | null;
+  token_input: number;
+  token_output: number;
+  token_total: number;
+  // S9: PID of the currently running agent subprocess (null when not running).
+  agent_pid: number | null;
+  // Heartbeat fields: agent liveness tracking
+  heartbeat_at: number | null;
+  heartbeat_timeout_ms: number | null;
+}
+
+export interface SymphonyEvent {
+  id: string;
+  issue_uuid: string;
+  ts: number;
+  kind: string;
+  message: string;
+  payload_json: string | null;
+}
+
+export interface Comment {
+  id: string;
+  issue_uuid: string;
+  ts: number;
+  author: string;
+  body: string;
+  metadata: unknown | null;
+}
